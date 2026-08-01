@@ -14,6 +14,7 @@ import {
   type RoomResultsSummary,
 } from '../domain/roomResults'
 import { MENU_CATALOG, type MenuItem } from '../data/menus'
+import { getMenuVisual } from '../data/menuVisuals'
 import type {
   GameLaunchOptions,
   PlayerGameResult,
@@ -63,6 +64,9 @@ export interface AppDebugState {
   readonly roomCode: string | null
   readonly room: Room | null
   readonly gameVisible: boolean
+  readonly startSoloGameForTest: (
+    deckSeed: GameLaunchOptions['deckSeed'],
+  ) => void
   readonly submitRoomResultForTest: (
     input: AppDebugRoomResultInput,
   ) => Promise<void>
@@ -150,6 +154,16 @@ export class AppController {
       roomCode: this.currentRoom?.code ?? null,
       room: this.currentRoom,
       gameVisible: !this.gameRoot.hidden,
+      startSoloGameForTest: (deckSeed) => {
+        if (!import.meta.env.DEV) {
+          throw new Error('솔로 게임 테스트 훅은 개발 모드에서만 사용할 수 있습니다.')
+        }
+        this.startGame({
+          mode: 'solo',
+          mealTime: 'lunch',
+          deckSeed,
+        })
+      },
       submitRoomResultForTest: async (input) => {
         if (!import.meta.env.DEV) {
           throw new Error('게임 결과 테스트 훅은 개발 모드에서만 사용할 수 있습니다.')
@@ -1410,9 +1424,28 @@ export class AppController {
     }
 
     const menu: MenuItem | undefined = MENU_BY_ID.get(menuId)
+    const visual = getMenuVisual(menuId)
     slot.dataset.menuId = menuId
     art.style.backgroundColor = menu?.placeholderColor ?? '#526579'
-    art.textContent = menu?.nameKo.slice(0, 1) ?? '?'
+
+    if (visual) {
+      const image = document.createElement('img')
+      image.alt = ''
+      image.decoding = 'async'
+      image.addEventListener(
+        'error',
+        () => {
+          image.remove()
+          art.textContent = menu?.nameKo.slice(0, 1) ?? '?'
+        },
+        { once: true },
+      )
+      image.src = visual.imageUrl
+      art.append(image)
+    } else {
+      art.textContent = menu?.nameKo.slice(0, 1) ?? '?'
+    }
+
     label.textContent = menu?.nameKo ?? menuId
     slot.append(art, label)
     return slot

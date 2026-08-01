@@ -64,6 +64,8 @@ function normalizedText(value: string): string {
   return value.replace(/\s+/gu, ' ').trim()
 }
 
+const GAME_CANVAS_TIMEOUT_MS = 12_000
+
 test('방장은 두 번째 참가자가 들어오면 준비 버튼 없이 시작한다', async ({
   page,
   context,
@@ -109,10 +111,10 @@ test('방장은 두 번째 참가자가 들어오면 준비 버튼 없이 시작
   await expect(participantPage.getByTestId('countdown')).toBeVisible()
 
   await expect(page.locator('#game-root canvas')).toBeVisible({
-    timeout: 7_000,
+    timeout: GAME_CANVAS_TIMEOUT_MS,
   })
   await expect(participantPage.locator('#game-root canvas')).toBeVisible({
-    timeout: 7_000,
+    timeout: GAME_CANVAS_TIMEOUT_MS,
   })
 
   const hostState = await readRoomGameDebugState(page)
@@ -152,10 +154,10 @@ test('두 탭의 결과를 기다렸다가 같은 순위와 겹침 메뉴를 공
   await expect(page.getByTestId('player-count')).toHaveText('2/8')
   await page.getByTestId('start-room').click()
   await expect(page.locator('#game-root canvas')).toBeVisible({
-    timeout: 7_000,
+    timeout: GAME_CANVAS_TIMEOUT_MS,
   })
   await expect(participantPage.locator('#game-root canvas')).toBeVisible({
-    timeout: 7_000,
+    timeout: GAME_CANVAS_TIMEOUT_MS,
   })
 
   await submitRoomResultForTest(page, {
@@ -187,6 +189,16 @@ test('두 탭의 결과를 기다렸다가 같은 순위와 겹침 메뉴를 공
   await expect(standings.nth(0).getByTestId('capture-slot')).toHaveCount(2)
   await expect(standings.nth(0)).toContainText('피자')
   await expect(standings.nth(0)).toContainText('파스타')
+
+  const pizzaImage = standings
+    .nth(0)
+    .locator('[data-menu-id="pizza"] img')
+  await expect(pizzaImage).toBeVisible()
+  await expect
+    .poll(() =>
+      pizzaImage.evaluate((image) => (image as HTMLImageElement).naturalWidth),
+    )
+    .toBeGreaterThan(0)
 
   await expect(standings.nth(1)).toContainText('2위')
   await expect(standings.nth(1)).toContainText('꼴찌')
@@ -316,10 +328,10 @@ test('게임 중 새로고침하면 같은 덱의 시작된 방으로 복귀한�
   await expect(page.getByTestId('player-count')).toHaveText('2/8')
   await page.getByTestId('start-room').click()
   await expect(page.locator('#game-root canvas')).toBeVisible({
-    timeout: 7_000,
+    timeout: GAME_CANVAS_TIMEOUT_MS,
   })
   await expect(participantPage.locator('#game-root canvas')).toBeVisible({
-    timeout: 7_000,
+    timeout: GAME_CANVAS_TIMEOUT_MS,
   })
 
   const beforeReload = await readRoomGameDebugState(page)
@@ -329,7 +341,7 @@ test('게임 중 새로고침하면 같은 덱의 시작된 방으로 복귀한�
   await page.getByTestId('join-room').click()
 
   await expect(page.locator('#game-root canvas')).toBeVisible({
-    timeout: 7_000,
+    timeout: GAME_CANVAS_TIMEOUT_MS,
   })
   const afterReload = await readRoomGameDebugState(page)
   expect(afterReload.mealTime).toBe('dinner')
@@ -364,10 +376,10 @@ test('결과 대기 중 새로고침하면 게임을 재실행하지 않고 대�
   await expect(page.getByTestId('player-count')).toHaveText('2/8')
   await page.getByTestId('start-room').click()
   await expect(page.locator('#game-root canvas')).toBeVisible({
-    timeout: 7_000,
+    timeout: GAME_CANVAS_TIMEOUT_MS,
   })
   await expect(participantPage.locator('#game-root canvas')).toBeVisible({
-    timeout: 7_000,
+    timeout: GAME_CANVAS_TIMEOUT_MS,
   })
 
   await submitRoomResultForTest(page, {

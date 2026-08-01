@@ -14,6 +14,7 @@ import {
   calculatePlayerScore,
   canCapture,
   createWeightedMenuDeck,
+  getRoundFallDurationMs,
   type RoundAction,
   type RoundResult,
 } from '../../domain/gameRules'
@@ -22,6 +23,10 @@ import {
   toWeightedMenuPool,
   type WeightedMenuCatalogEntry,
 } from '../../data/menus'
+import {
+  getMenuVisual,
+  getPreloadedMenuImage,
+} from '../../data/menuVisuals'
 import { LOGICAL_HEIGHT, LOGICAL_WIDTH } from '../createGame'
 import {
   createPlayerGameResultReporter,
@@ -34,7 +39,6 @@ const TOTAL_ROUNDS = 20
 const TOKEN_RADIUS = 64
 const TOKEN_START_Y = 190
 const MISS_LINE_Y = 704
-const FALL_DURATION_MS = 2_250
 const NEXT_ROUND_DELAY_MS = 320
 const PATH_SAMPLE_DISTANCE = 5
 const CAPTURE_CLOSURE_TOLERANCE = 34
@@ -47,6 +51,8 @@ interface ActiveToken {
   readonly menu: WeightedMenuCatalogEntry
   readonly container: Phaser.GameObjects.Container
   readonly tween: Phaser.Tweens.Tween
+  readonly fallDurationMs: number
+  readonly hasVisual: boolean
   pauseAvailable: boolean
 }
 
@@ -82,11 +88,7 @@ export class PrototypeScene extends Phaser.Scene {
     super('prototype')
   }
 
-  create(): void {
-    this.reportGameResult = createPlayerGameResultReporter(
-      this.launchOptions,
-      this.onGameResult,
-    )
+  init(): void {
     this.resetRunState()
     this.deck = createWeightedMenuDeck(
       toWeightedMenuPool(this.launchOptions.mealTime),
@@ -95,7 +97,15 @@ export class PrototypeScene extends Phaser.Scene {
         rng: createSeededRandom(this.launchOptions.deckSeed),
       },
     )
+  }
 
+  create(): void {
+    this.reportGameResult = createPlayerGameResultReporter(
+      this.launchOptions,
+      this.onGameResult,
+    )
+
+    this.registerMenuTextures()
     this.drawArena()
     this.createHud()
 
@@ -134,12 +144,14 @@ export class PrototypeScene extends Phaser.Scene {
     this.isFinished = false
   }
 
-
   getDebugState(): {
     readonly activeToken: {
       readonly x: number
       readonly y: number
       readonly radius: number
+      readonly menuId: string
+      readonly fallDurationMs: number
+      readonly hasVisual: boolean
     } | null
     readonly completedRounds: number
     readonly captureCount: number
@@ -155,6 +167,9 @@ export class PrototypeScene extends Phaser.Scene {
             x: this.activeToken.container.x,
             y: this.activeToken.container.y,
             radius: TOKEN_RADIUS,
+            menuId: this.activeToken.menu.id,
+            fallDurationMs: this.activeToken.fallDurationMs,
+            hasVisual: this.activeToken.hasVisual,
           }
         : null,
       completedRounds: this.rounds.length,
@@ -162,7 +177,7 @@ export class PrototypeScene extends Phaser.Scene {
         (round) => round.action.type === 'capture',
       ).length,
       lastAction: this.rounds.at(-1)?.action.type ?? null,
-      feedback: this.feedbackText.text,
+      feedback: this.feedbackText?.text ?? '',
       mealTime: this.launchOptions.mealTime,
       deckSeed: this.launchOptions.deckSeed,
       deckMenuIds: this.deck.map((menu) => menu.id),
@@ -173,6 +188,21 @@ export class PrototypeScene extends Phaser.Scene {
     if (import.meta.env.DEV && this.activeToken) {
       this.activeToken.tween.pause()
       this.pausedToken = this.activeToken
+    }
+  }
+
+  private registerMenuTextures(): void {
+    for (const menu of this.deck) {
+      const visual = getMenuVisual(menu.id)
+      const image = getPreloadedMenuImage(menu.id)
+
+      if (
+        visual &&
+        image &&
+        !this.textures.exists(visual.textureKey)
+      ) {
+        this.textures.addImage(visual.textureKey, image)
+      }
     }
   }
 
@@ -275,13 +305,84 @@ export class PrototypeScene extends Phaser.Scene {
       throw new Error(`프로토타입 라운드 ${roundIndex} 데이터가 없습니다.`)
     }
 
+    const tokenVisual = this.createTokenVisual(menu)
+    const fallDurationMs = getRoundFallDurationMs(roundIndex)
+
+    const container = this.add
+      .container(x, TOKEN_START_Y, tokenVisual.children)
+      .setDepth(5)
+
+    const tween = this.tweens.add({
+      targets: container,
+      y: MISS_LINE_Y + TOKEN_RADIUS,
+      duration: fallDurationMs,
+      ease: 'Linear',
+      onComplete: () => {
+        if (this.activeToken?.container === container) {
+          this.resolveRound({ type: 'miss' })
+        }
+      },
+    })
+
+    this.activeToken = {
+      menu,
+      container,
+      tween,
+      fallDurationMs,
+      hasVisual: tokenVisual.hasVisual,
+      pauseAvailable: true,
+    }
+    this.feedbackText.setText(`${menu.nameKo} — 포획할까, 반으로 썰까?`)
+    this.updateHud()
+  }
+
+  private createTokenVisual(menu: WeightedMenuCatalogEntry): {
+    readonly children: Phaser.GameObjects.GameObject[]
+    readonly hasVisual: boolean
+  } {
     const shadow = this.add.circle(5, 8, TOKEN_RADIUS + 5, 0x05090d, 0.35)
     const sticker = this.add.circle(0, 0, TOKEN_RADIUS, 0xfff8e7)
+    const placeholderColor = Number.parseInt(
+      menu.placeholderColor.slice(1),
+      16,
+    )
+    const visual = getMenuVisual(menu.id)
+
+    if (visual && this.textures.exists(visual.textureKey)) {
+      const colorBacking = this.add.circle(
+        0,
+        0,
+        TOKEN_RADIUS - 8,
+        placeholderColor,
+        0.24,
+      )
+      const foodImage = this.add
+        .image(0, -7, visual.textureKey)
+        .setDisplaySize(112, 112)
+      const labelPlate = this.add
+        .rectangle(0, 44, 98, 25, 0x101821, 0.88)
+        .setStrokeStyle(2, 0xfff8e7, 0.8)
+      const label = this.add
+        .text(0, 44, menu.nameKo, {
+          align: 'center',
+          color: '#fff8e7',
+          fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+          fontSize: '14px',
+          fontStyle: 'bold',
+        })
+        .setOrigin(0.5)
+
+      return {
+        children: [shadow, sticker, colorBacking, foodImage, labelPlate, label],
+        hasVisual: true,
+      }
+    }
+
     const food = this.add.circle(
       0,
       0,
       TOKEN_RADIUS - 8,
-      Number.parseInt(menu.placeholderColor.slice(1), 16),
+      placeholderColor,
     )
     const shine = this.add.circle(-21, -24, 15, 0xffffff, 0.22)
     const label = this.add
@@ -295,30 +396,10 @@ export class PrototypeScene extends Phaser.Scene {
       })
       .setOrigin(0.5)
 
-    const container = this.add
-      .container(x, TOKEN_START_Y, [shadow, sticker, food, shine, label])
-      .setDepth(5)
-
-    const tween = this.tweens.add({
-      targets: container,
-      y: MISS_LINE_Y + TOKEN_RADIUS,
-      duration: FALL_DURATION_MS,
-      ease: 'Linear',
-      onComplete: () => {
-        if (this.activeToken?.container === container) {
-          this.resolveRound({ type: 'miss' })
-        }
-      },
-    })
-
-    this.activeToken = {
-      menu,
-      container,
-      tween,
-      pauseAvailable: true,
+    return {
+      children: [shadow, sticker, food, shine, label],
+      hasVisual: false,
     }
-    this.feedbackText.setText(`${menu.nameKo} — 포획할까, 반으로 썰까?`)
-    this.updateHud()
   }
 
   private handlePointerDown(pointer: Phaser.Input.Pointer): void {

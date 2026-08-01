@@ -4,6 +4,7 @@ import {
   calculatePlayerScore,
   canCapture,
   createWeightedMenuDeck,
+  getRoundFallDurationMs,
   rankPlayerResults,
   type PlayerResult,
   type RandomSource,
@@ -11,6 +12,20 @@ import {
   type RoundResult,
   type WeightedMenu,
 } from "../src/domain/gameRules";
+
+describe("getRoundFallDurationMs", () => {
+  it("uses a learn, core, and final-sprint pace across 20 rounds", () => {
+    expect([0, 4].map(getRoundFallDurationMs)).toEqual([2_600, 2_600]);
+    expect([5, 14].map(getRoundFallDurationMs)).toEqual([2_200, 2_200]);
+    expect([15, 19].map(getRoundFallDurationMs)).toEqual([1_800, 1_800]);
+  });
+
+  it("rejects round indexes outside the fixed deck", () => {
+    for (const roundIndex of [-1, 20, 1.5, Number.NaN]) {
+      expect(() => getRoundFallDurationMs(roundIndex)).toThrow(RangeError);
+    }
+  });
+});
 
 function makeMenuPool(count = 50): WeightedMenu[] {
   return Array.from({ length: count }, (_, index) => ({
