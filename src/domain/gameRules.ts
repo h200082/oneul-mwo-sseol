@@ -4,6 +4,35 @@ export const MAX_CAPTURES = 2;
 export const MAX_PLAYERS = 8;
 export const SCORE_DECIMAL_PLACES = 2;
 
+const ROUND_FALL_DURATION_MS = [2_600, 2_200, 1_800] as const;
+
+/**
+ * Returns the fall duration for one round in the fixed 20-menu game.
+ *
+ * Rounds 1-5 teach the gesture, rounds 6-15 form the core pace, and rounds
+ * 16-20 create the final sprint. Keeping this rule pure also guarantees that
+ * every client in a multiplayer room experiences the same pacing.
+ */
+export function getRoundFallDurationMs(roundIndex: number): number {
+  if (
+    !Number.isInteger(roundIndex) ||
+    roundIndex < 0 ||
+    roundIndex >= DEFAULT_DECK_SIZE
+  ) {
+    throw new RangeError(
+      `Round index must be an integer from 0 through ${DEFAULT_DECK_SIZE - 1}; received ${roundIndex}.`,
+    );
+  }
+
+  if (roundIndex < 5) {
+    return ROUND_FALL_DURATION_MS[0];
+  }
+  if (roundIndex < 15) {
+    return ROUND_FALL_DURATION_MS[1];
+  }
+  return ROUND_FALL_DURATION_MS[2];
+}
+
 export type RandomSource = () => number;
 
 export interface WeightedMenu {

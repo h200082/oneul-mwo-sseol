@@ -685,6 +685,16 @@
   text-shadow: 0 1px 4px rgb(0 0 0 / 42%);
 }
 
+.result-menu-art img {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 2px;
+  border-radius: inherit;
+  object-fit: contain;
+  user-select: none;
+}
+
 .result-menu-slot small {
   overflow: hidden;
   width: 100%;

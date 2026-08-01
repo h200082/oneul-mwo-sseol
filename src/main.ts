@@ -5,6 +5,7 @@ import {
   type AppDebugState,
 } from './app/AppController'
 import { createAppRuntime } from './bootstrap/createAppRuntime'
+import { preloadMenuVisuals } from './data/menuVisuals'
 
 interface DebugAppWindow extends Window {
   __NHN_APP__?: {
@@ -22,7 +23,10 @@ void bootstrap(appRoot)
 
 async function bootstrap(root: HTMLElement): Promise<void> {
   try {
-    const runtime = await createAppRuntime()
+    const [runtime] = await Promise.all([
+      createAppRuntime(),
+      preloadMenuVisuals(),
+    ])
     const app = new AppController(root, runtime.gateway, {
       backend: runtime.backend,
       ...(runtime.playerId

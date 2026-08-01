@@ -5,6 +5,9 @@ interface PrototypeDebugState {
     readonly x: number
     readonly y: number
     readonly radius: number
+    readonly menuId: string
+    readonly fallDurationMs: number
+    readonly hasVisual: boolean
   } | null
   readonly completedRounds: number
   readonly captureCount: number
@@ -13,6 +16,11 @@ interface PrototypeDebugState {
 }
 
 interface PrototypeDebugWindow extends Window {
+  __NHN_APP__?: {
+    getDebugState: () => {
+      startSoloGameForTest: (deckSeed: number | string) => void
+    }
+  }
   __NHN_GAME__?: {
     scene: {
       getScene: (key: string) => {
@@ -97,6 +105,23 @@ async function startSoloGame(page: Page): Promise<void> {
   await expect(page.locator('#game-root canvas')).toBeVisible()
 }
 
+async function startVisualGameForTest(page: Page): Promise<void> {
+  await page.waitForFunction(() =>
+    Boolean((window as PrototypeDebugWindow).__NHN_APP__),
+  )
+  await page.evaluate(() => {
+    const debugWindow = window as PrototypeDebugWindow
+    const app = debugWindow.__NHN_APP__
+
+    if (!app) {
+      throw new Error('앱 디버그 훅을 찾을 수 없습니다.')
+    }
+
+    app.getDebugState().startSoloGameForTest(7)
+  })
+  await expect(page.locator('#game-root canvas')).toBeVisible()
+}
+
 test.beforeEach(async ({ page }) => {
   await page.goto('/')
 })
@@ -109,6 +134,18 @@ test('홈에서 핵심 시작 방법을 표시한다', async ({ page }) => {
   await expect(page.getByTestId('join-room')).toBeVisible()
   await expect(page.getByTestId('scan-qr')).toBeVisible()
   await expect(page.locator('#game-root canvas')).toHaveCount(0)
+})
+
+test('대표 음식 이미지를 Phaser 토큰으로 등록한다', async ({ page }) => {
+  await startVisualGameForTest(page)
+  await waitForActiveToken(page)
+
+  const activeToken = (await readDebugState(page)).activeToken
+  expect(activeToken).toMatchObject({
+    menuId: 'kimchi-jjigae',
+    fallDurationMs: 2_600,
+    hasVisual: true,
+  })
 })
 
 test('토큰을 가로지르면 한 라운드를 베기로 완료한다', async (
