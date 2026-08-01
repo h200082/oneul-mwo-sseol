@@ -1,0 +1,306 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function validCode(code) {
+      return code.matches('^[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{8}$');
+    }
+
+    function validNickname(value) {
+      return value is string
+        && value.size() >= 1
+        && value.size() <= 16
+        && value.matches('.*\\S.*');
+    }
+
+    function validPlayer(players, uid) {
+      return players[uid] is map
+        && players[uid].keys().hasAll(['nickname'])
+        && players[uid].keys().hasOnly(['nickname'])
+        && validNickname(players[uid].nickname);
+    }
+
+    function validRoom(data, code) {
+      return data.keys().hasAll([
+          'schemaVersion',
+          'code',
+          'mealTime',
+          'status',
+          'hostPlayerId',
+          'memberIds',
+          'players',
+          'start',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'schemaVersion',
+          'code',
+          'mealTime',
+          'status',
+          'hostPlayerId',
+          'memberIds',
+          'players',
+          'start',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.schemaVersion == 1
+        && data.code == code
+        && validCode(code)
+        && data.mealTime in ['lunch', 'dinner']
+        && data.status in ['waiting', 'started']
+        && data.hostPlayerId is string
+        && data.memberIds is list
+        && data.players is map
+        && data.memberIds.size() >= 1
+        && data.memberIds.size() <= 8
+        && data.memberIds.toSet().size() == data.memberIds.size()
+        && data.players.size() == data.memberIds.size()
+        && data.players.keys().toSet() == data.memberIds.toSet()
+        && data.hostPlayerId == data.memberIds[0]
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && (
+          (data.status == 'waiting' && data.start == null)
+          || (data.status == 'started' && data.start is map)
+        );
+    }
+
+    function onlyRoomFieldsChanged(fields) {
+      return request.resource.data
+        .diff(resource.data)
+        .affectedKeys()
+        .hasOnly(fields);
+    }
+
+    function isRoomCreate(code) {
+      let data = request.resource.data;
+      let uid = request.auth.uid;
+
+      return validRoom(data, code)
+        && data.status == 'waiting'
+        && data.start == null
+        && data.hostPlayerId == uid
+        && data.memberIds == [uid]
+        && data.players.size() == 1
+        && validPlayer(data.players, uid)
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    function isSelfJoin() {
+      let oldData = resource.data;
+      let newData = request.resource.data;
+      let uid = request.auth.uid;
+      let playerDiff = newData.players.diff(oldData.players);
+
+      return oldData.status == 'waiting'
+        && newData.status == 'waiting'
+        && oldData.memberIds.size() < 8
+        && !(uid in oldData.memberIds)
+        && newData.memberIds == oldData.memberIds.concat([uid])
+        && playerDiff.addedKeys().hasOnly([uid])
+        && playerDiff.addedKeys().size() == 1
+        && playerDiff.affectedKeys().hasOnly([uid])
+        && validPlayer(newData.players, uid)
+        && newData.updatedAt == request.time
+        && onlyRoomFieldsChanged([
+          'memberIds',
+          'players',
+          'updatedAt'
+        ]);
+    }
+
+    function isSelfReconnect() {
+      let oldData = resource.data;
+      let newData = request.resource.data;
+      let uid = request.auth.uid;
+      let playerDiff = newData.players.diff(oldData.players);
+
+      return oldData.status == 'waiting'
+        && newData.status == 'waiting'
+        && uid in oldData.memberIds
+        && newData.memberIds == oldData.memberIds
+        && playerDiff.changedKeys().hasOnly([uid])
+        && playerDiff.changedKeys().size() <= 1
+        && playerDiff.addedKeys().size() == 0
+        && playerDiff.removedKeys().size() == 0
+        && validPlayer(newData.players, uid)
+        && newData.updatedAt == request.time
+        && onlyRoomFieldsChanged(['players', 'updatedAt']);
+    }
+
+    function isSelfLeave() {
+      let oldData = resource.data;
+      let newData = request.resource.data;
+      let uid = request.auth.uid;
+      let playerDiff = newData.players.diff(oldData.players);
+
+      return oldData.status == 'waiting'
+        && newData.status == 'waiting'
+        && oldData.memberIds.size() > 1
+        && uid in oldData.memberIds
+        && newData.memberIds == oldData.memberIds.removeAll([uid])
+        && playerDiff.removedKeys().hasOnly([uid])
+        && playerDiff.removedKeys().size() == 1
+        && playerDiff.affectedKeys().hasOnly([uid])
+        && (
+          (uid != oldData.hostPlayerId
+            && newData.hostPlayerId == oldData.hostPlayerId)
+          || (uid == oldData.hostPlayerId
+            && newData.hostPlayerId == newData.memberIds[0])
+        )
+        && newData.updatedAt == request.time
+        && onlyRoomFieldsChanged([
+          'hostPlayerId',
+          'memberIds',
+          'players',
+          'updatedAt'
+        ]);
+    }
+
+    function validStart(start, memberIds) {
+      return start is map
+        && start.keys().hasAll([
+          'deckSeed',
+          'contentVersion',
+          'startAt',
+          'rosterIds'
+        ])
+        && start.keys().hasOnly([
+          'deckSeed',
+          'contentVersion',
+          'startAt',
+          'rosterIds'
+        ])
+        && start.deckSeed is string
+        && start.deckSeed.size() >= 1
+        && start.deckSeed.size() <= 128
+        && start.deckSeed.matches('.*\\S.*')
+        && start.contentVersion is string
+        && start.contentVersion.size() >= 1
+        && start.contentVersion.size() <= 64
+        && start.contentVersion.matches('.*\\S.*')
+        && start.startAt is timestamp
+        && start.startAt >= request.time - duration.value(30, 's')
+        && start.startAt <= request.time + duration.value(30, 's')
+        && start.rosterIds == memberIds;
+    }
+
+    function isHostStart() {
+      let oldData = resource.data;
+      let newData = request.resource.data;
+
+      return oldData.status == 'waiting'
+        && newData.status == 'started'
+        && request.auth.uid == oldData.hostPlayerId
+        && oldData.memberIds.size() >= 2
+        && oldData.memberIds.size() <= 8
+        && newData.memberIds == oldData.memberIds
+        && newData.players == oldData.players
+        && newData.hostPlayerId == oldData.hostPlayerId
+        && validStart(newData.start, oldData.memberIds)
+        && newData.updatedAt == request.time
+        && onlyRoomFieldsChanged(['status', 'start', 'updatedAt']);
+    }
+
+    function validCapturedMenuIds(ids) {
+      return ids is list
+        && ids.size() <= 2
+        && (
+          ids.size() == 0
+          || (
+            ids.size() == 1
+            && ids[0] is string
+            && ids[0].size() >= 1
+            && ids[0].size() <= 64
+          )
+          || (
+            ids.size() == 2
+            && ids[0] is string
+            && ids[1] is string
+            && ids[0].size() >= 1
+            && ids[0].size() <= 64
+            && ids[1].size() >= 1
+            && ids[1].size() <= 64
+            && ids[0] != ids[1]
+          )
+        );
+    }
+
+    function parentRoom(roomCode) {
+      return get(
+        /databases/$(database)/documents/rooms/$(roomCode)
+      ).data;
+    }
+
+    function mayReadResults(roomCode) {
+      let room = parentRoom(roomCode);
+      return signedIn() && request.auth.uid in room.memberIds;
+    }
+
+    function mayCreateResult(roomCode, resultUid) {
+      let room = parentRoom(roomCode);
+      let data = request.resource.data;
+
+      return signedIn()
+        && resultUid == request.auth.uid
+        && room.status == 'started'
+        && resultUid in room.memberIds
+        && data.keys().hasAll([
+          'playerId',
+          'score',
+          'capturedMenuIds',
+          'completedAt'
+        ])
+        && data.keys().hasOnly([
+          'playerId',
+          'score',
+          'capturedMenuIds',
+          'completedAt'
+        ])
+        && data.playerId == resultUid
+        && data.score is number
+        && data.score >= 0
+        && data.score <= 100
+        && validCapturedMenuIds(data.capturedMenuIds)
+        && data.completedAt == request.time;
+    }
+
+    match /rooms/{roomCode} {
+      // Exact room-code lookups are allowed after anonymous authentication;
+      // collection enumeration stays disabled.
+      allow get: if signedIn();
+      allow list: if false;
+
+      allow create: if signedIn() && isRoomCreate(roomCode);
+      allow update: if signedIn()
+        && validRoom(request.resource.data, roomCode)
+        && (
+          isSelfJoin()
+          || isSelfReconnect()
+          || isSelfLeave()
+          || isHostStart()
+        );
+      allow delete: if signedIn()
+        && resource.data.status == 'waiting'
+        && resource.data.hostPlayerId == request.auth.uid
+        && resource.data.memberIds == [request.auth.uid];
+
+      match /results/{resultUid} {
+        allow get, list: if mayReadResults(roomCode);
+        allow create: if mayCreateResult(roomCode, resultUid);
+        allow update, delete: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
