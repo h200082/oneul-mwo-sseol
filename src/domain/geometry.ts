@@ -546,6 +546,84 @@ export function doesPathContainCircleCenter(
   );
 }
 
+function squaredDistanceFromPointToSegment(
+  point: Point,
+  segmentStart: Point,
+  segmentEnd: Point,
+): number {
+  const segmentX = segmentEnd.x - segmentStart.x;
+  const segmentY = segmentEnd.y - segmentStart.y;
+  const squaredLength = segmentX * segmentX + segmentY * segmentY;
+
+  if (squaredLength <= GEOMETRY_EPSILON ** 2) {
+    return squaredDistance(point, segmentStart);
+  }
+
+  const projection = Math.min(
+    1,
+    Math.max(
+      0,
+      ((point.x - segmentStart.x) * segmentX +
+        (point.y - segmentStart.y) * segmentY) /
+        squaredLength,
+    ),
+  );
+  const closestPoint = interpolatePoint(
+    segmentStart,
+    segmentEnd,
+    projection,
+  );
+
+  return squaredDistance(point, closestPoint);
+}
+
+/**
+ * Returns whether a valid closed path surrounds the complete judgement
+ * circle, rather than merely containing its center.
+ *
+ * The caller can separately require a simple path. For a simple polygon, a
+ * contained center plus at least one radius of clearance from every boundary
+ * segment means the full circle is contained. Touching the boundary counts as
+ * contained to keep capture forgiving at the exact edge.
+ */
+export function doesClosedPathContainCircle(
+  path: readonly Point[],
+  circle: Circle,
+  closureTolerance = DEFAULT_PATH_CLOSURE_TOLERANCE,
+): boolean {
+  assertCircle(circle);
+
+  if (
+    !doesClosedPathContainPoint(
+      path,
+      circle.center,
+      closureTolerance,
+    )
+  ) {
+    return false;
+  }
+
+  const squaredRadius = circle.radius * circle.radius;
+
+  for (let index = 0; index < path.length; index += 1) {
+    const segmentStart = path[index]!;
+    const segmentEnd = path[(index + 1) % path.length]!;
+
+    if (
+      squaredDistanceFromPointToSegment(
+        circle.center,
+        segmentStart,
+        segmentEnd,
+      ) <
+      squaredRadius - GEOMETRY_EPSILON
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function getSegmentLineValues(
   segmentStart: Point,
   segmentEnd: Point,

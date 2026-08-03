@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { MENU_CATALOG } from '../src/data/menus'
 import {
   MENU_VISUALS,
+  calculateContainedSize,
   getMenuVisual,
   preloadMenuVisuals,
 } from '../src/data/menuVisuals'
@@ -61,6 +62,46 @@ describe('MENU_VISUALS', () => {
 
   it('does not require the browser Image API in the unit-test runtime', async () => {
     await expect(preloadMenuVisuals()).resolves.toBeUndefined()
+  })
+})
+
+describe('calculateContainedSize', () => {
+  it.each([
+    {
+      source: [1_000, 500],
+      maximum: [120, 100],
+      expected: { width: 120, height: 60 },
+    },
+    {
+      source: [500, 1_000],
+      maximum: [120, 100],
+      expected: { width: 50, height: 100 },
+    },
+    {
+      source: [512, 512],
+      maximum: [120, 100],
+      expected: { width: 100, height: 100 },
+    },
+  ])('contains $source inside $maximum without stretching', ({
+    source,
+    maximum,
+    expected,
+  }) => {
+    expect(
+      calculateContainedSize(
+        source[0]!,
+        source[1]!,
+        maximum[0]!,
+        maximum[1]!,
+      ),
+    ).toEqual(expected)
+  })
+
+  it('rejects zero or non-finite dimensions', () => {
+    expect(() => calculateContainedSize(0, 512, 120, 100)).toThrow(RangeError)
+    expect(() => calculateContainedSize(512, 512, Infinity, 100)).toThrow(
+      RangeError,
+    )
   })
 })
 
