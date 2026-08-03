@@ -7,6 +7,7 @@ import {
   calculateSmallerCircleAreaRatio,
   DEFAULT_PATH_CLOSURE_TOLERANCE,
   doesClosedPathContainPoint,
+  doesClosedPathContainCircle,
   doesPathContainCircleCenter,
   doesSegmentCrossCircle,
   findFirstCircleCrossingChord,
@@ -114,6 +115,38 @@ describe("closed-path containment", () => {
     expect(
       doesPathContainCircleCenter(openPath, TOKEN, 10),
     ).toBe(false);
+  });
+
+  it("requires a capture path to surround the complete circle", () => {
+    expect(
+      doesClosedPathContainCircle(surroundingPath, TOKEN),
+    ).toBe(true);
+
+    const centerOnlyPath: Point[] = [
+      { x: -60, y: -10 },
+      { x: 60, y: -10 },
+      { x: 60, y: 10 },
+      { x: -60, y: 10 },
+      { x: -60, y: -10 },
+    ];
+
+    expect(
+      doesClosedPathContainCircle(centerOnlyPath, TOKEN),
+    ).toBe(false);
+  });
+
+  it("allows the capture boundary to touch the judgement circle", () => {
+    const tangentSquare: Point[] = [
+      { x: -50, y: -50 },
+      { x: 50, y: -50 },
+      { x: 50, y: 50 },
+      { x: -50, y: 50 },
+      { x: -50, y: -50 },
+    ];
+
+    expect(
+      doesClosedPathContainCircle(tangentSquare, TOKEN, 0),
+    ).toBe(true);
   });
 });
 

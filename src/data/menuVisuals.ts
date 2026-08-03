@@ -10,6 +10,40 @@ export interface MenuVisual {
   readonly imageUrl: string
 }
 
+export interface ContainedSize {
+  readonly width: number
+  readonly height: number
+}
+
+/**
+ * Fits artwork inside a render box without changing its original aspect
+ * ratio. This keeps future wide, tall, and irregular transparent food assets
+ * from being stretched into a square token.
+ */
+export function calculateContainedSize(
+  sourceWidth: number,
+  sourceHeight: number,
+  maximumWidth: number,
+  maximumHeight: number,
+): ContainedSize {
+  for (const [name, value] of [
+    ['sourceWidth', sourceWidth],
+    ['sourceHeight', sourceHeight],
+    ['maximumWidth', maximumWidth],
+    ['maximumHeight', maximumHeight],
+  ] as const) {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new RangeError(`${name} must be a positive finite number.`)
+    }
+  }
+
+  const scale = Math.min(
+    maximumWidth / sourceWidth,
+    maximumHeight / sourceHeight,
+  )
+  return { width: sourceWidth * scale, height: sourceHeight * scale }
+}
+
 export const MENU_VISUALS: readonly MenuVisual[] = Object.freeze([
   {
     menuId: 'ramyeon',
