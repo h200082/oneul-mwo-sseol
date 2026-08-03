@@ -1,13 +1,7 @@
 import Phaser from 'phaser'
+import { type Circle, type Point } from '../../domain/geometry'
 import {
-  isPathClosed,
-  type Circle,
-  type Point,
-} from '../../domain/geometry'
-import {
-  calculatePathLength,
   classifyGesture,
-  type CaptureGestureDecision,
   type SliceGestureDecision,
 } from '../../domain/gestureClassifier'
 import {
@@ -41,10 +35,11 @@ const JUDGEMENT_RADIUS = 64
 const TOKEN_START_Y = 190
 const MISS_LINE_Y = 704
 const PATH_SAMPLE_DISTANCE = 5
-const CAPTURE_CLOSURE_TOLERANCE = 34
 const MAX_PATH_POINTS = 192
 const MAX_GESTURE_DURATION_MS = 2_000
-const GESTURE_PAUSE_BUDGET_MS = 1_100
+const CAPTURE_HOLD_DURATION_MS = 320
+const CAPTURE_HIT_RADIUS = JUDGEMENT_RADIUS + 16
+const CAPTURE_DRAG_THRESHOLD = 14
 const TOKEN_VISUAL_MAX_WIDTH = 128
 const TOKEN_VISUAL_MAX_HEIGHT = 112
 const SLICE_EFFECT_DURATION_MS = 440
@@ -66,7 +61,15 @@ interface ActiveToken {
   readonly fallDurationMs: number
   readonly hasVisual: boolean
   readonly renderBounds: TokenVisual['renderBounds']
-  pauseRemainingMs: number
+}
+
+interface HoldCaptureState {
+  readonly token: ActiveToken
+  readonly pointerId: number
+  readonly anchor: Point
+  readonly graphics: Phaser.GameObjects.Graphics
+  readonly progress: { value: number }
+  readonly tween: Phaser.Tweens.Tween
 }
 
 interface CaptureSlot {
@@ -90,20 +93,21 @@ export class PrototypeScene extends Phaser.Scene {
   private captureText!: Phaser.GameObjects.Text
   private feedbackText!: Phaser.GameObjects.Text
   private activeToken: ActiveToken | null = null
-  private pausedToken: ActiveToken | null = null
+  private holdCapture: HoldCaptureState | null = null
   private captureSlots: CaptureSlot[] = []
   private filledCaptureSlotCount = 0
-  private pauseBudgetTimer: Phaser.Time.TimerEvent | null = null
-  private pauseStartedAt: number | null = null
   private lastSliceAngleDegrees: number | null = null
+  private lastSliceSource: SliceGestureDecision['source'] | null = null
   private activeSlicePieceCount = 0
   private cleanedSlicePieceCount = 0
   private gestureTimeout: Phaser.Time.TimerEvent | null = null
   private activePointerId: number | null = null
   private path: Point[] = []
+  private localPath: Point[] = []
   private rounds: RoundResult[] = []
   private deck: readonly WeightedMenuCatalogEntry[] = []
   private isDrawing = false
+  private isSlicing = false
   private isFinished = false
 
   constructor(
@@ -179,22 +183,24 @@ export class PrototypeScene extends Phaser.Scene {
 
   private resetRunState(): void {
     this.gestureTimeout?.remove(false)
-    this.pauseBudgetTimer?.remove(false)
+    this.holdCapture?.tween.stop()
+    this.holdCapture?.graphics.destroy()
     this.activeToken = null
-    this.pausedToken = null
+    this.holdCapture = null
     this.captureSlots = []
     this.filledCaptureSlotCount = 0
-    this.pauseBudgetTimer = null
-    this.pauseStartedAt = null
     this.lastSliceAngleDegrees = null
+    this.lastSliceSource = null
     this.activeSlicePieceCount = 0
     this.cleanedSlicePieceCount = 0
     this.gestureTimeout = null
     this.activePointerId = null
     this.path = []
+    this.localPath = []
     this.rounds = []
     this.deck = []
     this.isDrawing = false
+    this.isSlicing = false
     this.isFinished = false
   }
 
@@ -218,7 +224,10 @@ export class PrototypeScene extends Phaser.Scene {
     readonly captureCount: number
     readonly filledCaptureSlotCount: number
     readonly pathPointCount: number
+    readonly localPathPointCount: number
     readonly lastSliceAngleDegrees: number | null
+    readonly lastSliceSource: SliceGestureDecision['source'] | null
+    readonly inputMode: 'idle' | 'hold' | 'slice'
     readonly activeSlicePieceCount: number
     readonly cleanedSlicePieceCount: number
     readonly lastAction: RoundAction['type'] | null
@@ -251,7 +260,14 @@ export class PrototypeScene extends Phaser.Scene {
       ).length,
       filledCaptureSlotCount: this.filledCaptureSlotCount,
       pathPointCount: this.path.length,
+      localPathPointCount: this.localPath.length,
       lastSliceAngleDegrees: this.lastSliceAngleDegrees,
+      lastSliceSource: this.lastSliceSource,
+      inputMode: this.holdCapture
+        ? 'hold'
+        : this.isSlicing
+          ? 'slice'
+          : 'idle',
       activeSlicePieceCount: this.activeSlicePieceCount,
       cleanedSlicePieceCount: this.cleanedSlicePieceCount,
       lastAction: this.rounds.at(-1)?.action.type ?? null,
@@ -259,16 +275,6 @@ export class PrototypeScene extends Phaser.Scene {
       mealTime: this.launchOptions.mealTime,
       deckSeed: this.launchOptions.deckSeed,
       deckMenuIds: this.deck.map((menu) => menu.id),
-    }
-  }
-
-  pauseActiveTokenForTest(): void {
-    if (import.meta.env.DEV && this.activeToken) {
-      this.activeToken.tween.pause()
-      this.pauseBudgetTimer?.remove(false)
-      this.pauseBudgetTimer = null
-      this.pauseStartedAt = null
-      this.pausedToken = this.activeToken
     }
   }
 
@@ -323,7 +329,7 @@ export class PrototypeScene extends Phaser.Scene {
       .setOrigin(0.5)
 
     this.add
-      .text(LOGICAL_WIDTH / 2, 786, '원을 그리면 포획 · 가로지르면 베기', {
+      .text(LOGICAL_WIDTH / 2, 786, '0.3초 꾹 누르면 포획 · 드래그하면 베기', {
         color: '#b9c5d3',
         fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
         fontSize: '15px',
@@ -431,10 +437,9 @@ export class PrototypeScene extends Phaser.Scene {
       fallDurationMs,
       hasVisual: tokenVisual.hasVisual,
       renderBounds: tokenVisual.renderBounds,
-      pauseRemainingMs: GESTURE_PAUSE_BUDGET_MS,
     }
     this.feedbackText.setColor('#fff8e7')
-    this.feedbackText.setText(`${menu.nameKo} — 포획할까, 반으로 썰까?`)
+    this.feedbackText.setText(`${menu.nameKo} — 꾹 눌러 포획 · 드래그해 베기`)
     this.updateHud()
   }
 
@@ -610,19 +615,25 @@ export class PrototypeScene extends Phaser.Scene {
       return
     }
 
-    this.activePointerId = pointer.id
     const startPoint = this.toPoint(pointer)
-    this.isDrawing = true
-    this.path = [startPoint]
-    this.drawTrail()
+    const localStartPoint = this.toTokenLocalPoint(startPoint, token)
+    const captureCount = this.rounds.filter(
+      (round) => round.action.type === 'capture',
+    ).length
+    const startsOnCaptureTarget =
+      Math.hypot(localStartPoint.x, localStartPoint.y) <= CAPTURE_HIT_RADIUS
 
-    const tokenCenter = {
-      x: token.container.x,
-      y: token.container.y,
-    }
-    if (Phaser.Math.Distance.BetweenPoints(startPoint, tokenCenter) <=
-      JUDGEMENT_RADIUS * 2.5) {
-      this.pauseTokenForGesture(token)
+    this.activePointerId = pointer.id
+    this.isDrawing = true
+    this.isSlicing = !startsOnCaptureTarget
+    this.path = [startPoint]
+    this.localPath = [localStartPoint]
+    this.trail.clear()
+
+    if (startsOnCaptureTarget && captureCount < MAX_CAPTURES) {
+      this.startHoldCapture(token, pointer.id, startPoint)
+    } else if (startsOnCaptureTarget) {
+      this.feedbackText.setText('포획 2/2 완료 · 드래그하면 바로 베어요!')
     }
 
     this.clearGestureTimeout()
@@ -643,7 +654,20 @@ export class PrototypeScene extends Phaser.Scene {
     }
 
     const next = this.toPoint(pointer)
-    if (this.appendPathPoint(next)) {
+    const localNext = this.toTokenLocalPoint(next, this.activeToken)
+    const appended = this.appendPathPoint(next, localNext)
+    const start = this.path[0]
+    const dragDistance = start
+      ? Phaser.Math.Distance.BetweenPoints(start, next)
+      : 0
+
+    if (!this.isSlicing && dragDistance > CAPTURE_DRAG_THRESHOLD) {
+      this.cancelHoldCapture()
+      this.isSlicing = true
+      this.feedbackText.setText('휙 드래그! 그대로 베기')
+    }
+
+    if (this.isSlicing && appended) {
       this.drawTrail()
     }
   }
@@ -658,27 +682,36 @@ export class PrototypeScene extends Phaser.Scene {
       return
     }
 
+    const token = this.activeToken
+    const wasSlicing = this.isSlicing
+    const releasedHoldEarly = this.holdCapture !== null
     this.clearGestureTimeout()
+    this.cancelHoldCapture()
     this.isDrawing = false
+    this.isSlicing = false
     this.activePointerId = null
 
-    if (!this.activeToken) {
+    if (!token || this.activeToken?.container !== token.container) {
       this.path = []
+      this.localPath = []
       this.trail.clear()
-      this.resumePausedToken()
       return
     }
 
-    const finalPoint = this.toPoint(pointer)
-    const previous = this.path.at(-1)
-
-    if (!previous || Phaser.Math.Distance.BetweenPoints(previous, finalPoint) > 1) {
-      this.appendPathPoint(finalPoint, 1)
+    if (wasSlicing) {
+      const finalPoint = this.toPoint(pointer)
+      const localFinalPoint = this.toTokenLocalPoint(finalPoint, token)
+      this.appendPathPoint(finalPoint, localFinalPoint, 1)
+      this.drawTrail()
+      this.evaluateGesture()
+    } else if (releasedHoldEarly) {
+      this.feedbackText.setText('포획하려면 음식 위를 0.3초만 꾹 눌러주세요!')
     }
 
-    this.drawTrail()
-    this.evaluateGesture()
-    this.resumePausedToken()
+    if (this.activeToken?.container === token.container) {
+      this.path = []
+      this.localPath = []
+    }
 
     this.time.delayedCall(180, () => {
       this.trail.clear()
@@ -687,6 +720,7 @@ export class PrototypeScene extends Phaser.Scene {
 
   private appendPathPoint(
     point: Point,
+    localPoint: Point,
     minimumDistance = PATH_SAMPLE_DISTANCE,
   ): boolean {
     const previous = this.path.at(-1)
@@ -699,29 +733,43 @@ export class PrototypeScene extends Phaser.Scene {
 
     if (this.path.length >= MAX_PATH_POINTS) {
       const lastPoint = this.path.at(-1)
+      const lastLocalPoint = this.localPath.at(-1)
       this.path = this.path.filter((_, index) => index % 2 === 0)
-      if (lastPoint && this.path.at(-1) !== lastPoint) {
+      this.localPath = this.localPath.filter((_, index) => index % 2 === 0)
+      if (
+        lastPoint &&
+        lastLocalPoint &&
+        this.path.at(-1) !== lastPoint
+      ) {
         this.path.push(lastPoint)
+        this.localPath.push(lastLocalPoint)
       }
     }
 
     this.path.push(point)
+    this.localPath.push(localPoint)
     return true
   }
 
   private cancelGesture(): void {
     const wasDrawing = this.isDrawing
+    const wasHolding = this.holdCapture !== null
     this.clearGestureTimeout()
+    this.cancelHoldCapture()
     this.isDrawing = false
+    this.isSlicing = false
     this.activePointerId = null
     this.path = []
+    this.localPath = []
     this.trail.clear()
 
     if (wasDrawing && this.activeToken) {
-      this.feedbackText.setText('한 번에 그려주세요! 다시 시도할 수 있어요.')
+      this.feedbackText.setText(
+        wasHolding
+          ? '포획이 취소됐어요 · 다시 음식 위를 꾹 눌러주세요!'
+          : '베기가 취소됐어요 · 다시 드래그해 주세요!',
+      )
     }
-
-    this.resumePausedToken()
   }
 
   private clearGestureTimeout(): void {
@@ -731,10 +779,7 @@ export class PrototypeScene extends Phaser.Scene {
 
   private teardownInput(): void {
     this.clearGestureTimeout()
-    this.pauseBudgetTimer?.remove(false)
-    this.pauseBudgetTimer = null
-    this.pauseStartedAt = null
-    this.pausedToken = null
+    this.cancelHoldCapture()
     this.input.off(Phaser.Input.Events.POINTER_DOWN, this.handlePointerDown, this)
     this.input.off(Phaser.Input.Events.POINTER_MOVE, this.handlePointerMove, this)
     this.input.off(Phaser.Input.Events.POINTER_UP, this.handlePointerUp, this)
@@ -747,63 +792,111 @@ export class PrototypeScene extends Phaser.Scene {
     this.game.events.off(Phaser.Core.Events.BLUR, this.cancelGesture, this)
   }
 
-  private pauseTokenForGesture(token: ActiveToken): void {
+  private startHoldCapture(
+    token: ActiveToken,
+    pointerId: number,
+    anchor: Point,
+  ): void {
+    const graphics = this.add.graphics().setDepth(23)
+    const progress = { value: 0 }
+    let state: HoldCaptureState | null = null
+    const tween = this.tweens.add({
+      targets: progress,
+      value: 1,
+      duration: CAPTURE_HOLD_DURATION_MS,
+      ease: 'Linear',
+      onUpdate: () => {
+        if (state) {
+          this.drawHoldCapture(state)
+        }
+      },
+      onComplete: () => {
+        if (state) {
+          this.completeHoldCapture(state)
+        }
+      },
+    })
+
+    state = { token, pointerId, anchor, graphics, progress, tween }
+    this.holdCapture = state
+    this.drawHoldCapture(state)
+    this.feedbackText.setText('그대로 꾹! 포획 게이지가 차면 성공!')
+  }
+
+  private drawHoldCapture(state: HoldCaptureState): void {
+    const { x, y } = state.token.container
+    const radius = JUDGEMENT_RADIUS + 11
+    const endAngle = -Math.PI / 2 + Math.PI * 2 * state.progress.value
+
+    state.graphics.clear()
+    state.graphics.lineStyle(3, 0x55e6d1, 0.35)
+    state.graphics.lineBetween(state.anchor.x, state.anchor.y, x, y)
+    state.graphics.lineStyle(5, 0x394b61, 0.9)
+    state.graphics.strokeCircle(x, y, radius)
+    state.graphics.lineStyle(7, 0xffd76a, 1)
+    state.graphics.beginPath()
+    state.graphics.arc(x, y, radius, -Math.PI / 2, endAngle, false)
+    state.graphics.strokePath()
+    state.graphics.fillStyle(0xffd76a, 1)
+    state.graphics.fillCircle(state.anchor.x, state.anchor.y, 5)
+  }
+
+  private completeHoldCapture(state: HoldCaptureState): void {
+    const captureCount = this.rounds.filter(
+      (round) => round.action.type === 'capture',
+    ).length
     if (
-      this.pausedToken === token ||
-      token.pauseRemainingMs <= 0 ||
-      this.activeToken?.container !== token.container
+      this.holdCapture !== state ||
+      this.activePointerId !== state.pointerId ||
+      !this.isDrawing ||
+      this.isSlicing ||
+      this.activeToken?.container !== state.token.container ||
+      captureCount >= MAX_CAPTURES
     ) {
+      this.cancelHoldCapture()
       return
     }
 
-    token.tween.pause()
-    this.pausedToken = token
-    this.pauseStartedAt = this.time.now
-    this.pauseBudgetTimer = this.time.delayedCall(
-      token.pauseRemainingMs,
-      () => this.resumePausedToken(),
-    )
+    this.holdCapture = null
+    this.tweens.add({
+      targets: state.graphics,
+      alpha: 0,
+      duration: 160,
+      onComplete: () => state.graphics.destroy(),
+    })
+    this.resolveRound({ type: 'capture' })
   }
 
-  private resumePausedToken(): void {
-    const token = this.pausedToken
-    const pauseStartedAt = this.pauseStartedAt
-    this.pauseBudgetTimer?.remove(false)
-    this.pauseBudgetTimer = null
-    this.pauseStartedAt = null
-    this.pausedToken = null
-
-    if (token && pauseStartedAt !== null) {
-      token.pauseRemainingMs = Math.max(
-        0,
-        token.pauseRemainingMs - (this.time.now - pauseStartedAt),
-      )
+  private cancelHoldCapture(): void {
+    const state = this.holdCapture
+    this.holdCapture = null
+    if (!state) {
+      return
     }
 
-    if (token && this.activeToken?.container === token.container) {
-      token.tween.resume()
+    state.tween.stop()
+    state.graphics.destroy()
+  }
+
+  private toTokenLocalPoint(point: Point, token: ActiveToken): Point {
+    return {
+      x: point.x - token.container.x,
+      y: point.y - token.container.y,
     }
   }
 
   private evaluateGesture(): void {
     const token = this.activeToken
-    if (!token || this.path.length < 2) {
+    if (!token || this.localPath.length < 2) {
       return
     }
 
     const circle: Circle = {
-      center: {
-        x: token.container.x,
-        y: token.container.y,
-      },
+      center: { x: 0, y: 0 },
       radius: JUDGEMENT_RADIUS,
     }
-    const captureCount = this.rounds.filter(
-      (round) => round.action.type === 'capture',
-    ).length
-    const decision = classifyGesture(this.path, circle, {
-      captureAvailable: captureCount < MAX_CAPTURES,
-      closureTolerance: CAPTURE_CLOSURE_TOLERANCE,
+    const decision = classifyGesture(this.localPath, circle, {
+      intentPath: this.path,
     })
 
     if (import.meta.env.DEV) {
@@ -813,30 +906,40 @@ export class PrototypeScene extends Phaser.Scene {
       })
     }
 
-    if (decision.kind === 'capture') {
-      this.resolveRound({ type: 'capture' }, decision)
-    } else if (decision.kind === 'slice') {
+    if (decision.kind === 'slice') {
+      const worldDecision: SliceGestureDecision = {
+        ...decision,
+        chord: {
+          entryPoint: {
+            x: decision.chord.entryPoint.x + token.container.x,
+            y: decision.chord.entryPoint.y + token.container.y,
+          },
+          exitPoint: {
+            x: decision.chord.exitPoint.x + token.container.x,
+            y: decision.chord.exitPoint.y + token.container.y,
+          },
+        },
+      }
+      this.lastSliceSource = decision.source
       this.resolveRound(
         {
-        type: 'slice',
+          type: 'slice',
           accuracy: decision.result.accuracyScore,
         },
-        decision,
+        worldDecision,
       )
-    } else if (decision.reason === 'capture-limit') {
-      this.feedbackText.setText('포획 2/2 완료 · 이제 열린 선으로 베어주세요!')
     } else if (decision.reason === 'closed-invalid') {
-      this.feedbackText.setText('음식 전체를 감싸고 시작점으로 돌아와 주세요!')
+      this.feedbackText.setText('포획은 원 대신 음식 위를 꾹 눌러주세요!')
     } else if (decision.reason === 'too-short') {
-      this.feedbackText.setText('조금 더 길게 한 번에 그려주세요!')
+      this.feedbackText.setText('조금 더 길게 드래그하면 베어져요!')
     } else {
-      this.feedbackText.setText('양쪽 바깥까지 가로질러 썰어보세요!')
+      this.feedbackText.setText('음식 안쪽을 스치도록 드래그해 보세요!')
     }
   }
 
   private resolveRound(
     action: RoundAction,
-    decision?: SliceGestureDecision | CaptureGestureDecision,
+    decision?: SliceGestureDecision,
   ): void {
     const token = this.activeToken
     if (!token) {
@@ -844,13 +947,12 @@ export class PrototypeScene extends Phaser.Scene {
     }
 
     this.clearGestureTimeout()
+    this.cancelHoldCapture()
     this.isDrawing = false
+    this.isSlicing = false
     this.activePointerId = null
     this.path = []
-    this.pauseBudgetTimer?.remove(false)
-    this.pauseBudgetTimer = null
-    this.pauseStartedAt = null
-    this.pausedToken = null
+    this.localPath = []
     if (action.type === 'miss') {
       this.trail.clear()
     }
@@ -868,11 +970,8 @@ export class PrototypeScene extends Phaser.Scene {
     this.updateHud()
 
     if (action.type === 'capture') {
-      if (!decision || decision.kind !== 'capture') {
-        throw new Error('포획 연출에는 포획 제스처 결정이 필요합니다.')
-      }
-      this.feedbackText.setText(`${token.menu.nameKo} 포획!`)
-      this.playCaptureResolution(token, decision)
+      this.feedbackText.setText(`${token.menu.nameKo} 포획! ${this.filledCaptureSlotCount + 1}/${MAX_CAPTURES}`)
+      this.playCaptureResolution(token)
     } else if (action.type === 'slice') {
       if (!decision || decision.kind !== 'slice') {
         throw new Error('베기 연출에는 베기 제스처 결정이 필요합니다.')
@@ -900,11 +999,8 @@ export class PrototypeScene extends Phaser.Scene {
     this.time.delayedCall(nextRoundDelay, () => this.spawnRound())
   }
 
-  private playCaptureResolution(
-    token: ActiveToken,
-    decision: CaptureGestureDecision,
-  ): void {
-    this.drawCaptureRing(decision.path)
+  private playCaptureResolution(token: ActiveToken): void {
+    this.drawCaptureBurst({ x: token.container.x, y: token.container.y })
     this.cameras.main.shake(70, 0.002)
 
     const captureIndex =
@@ -930,32 +1026,18 @@ export class PrototypeScene extends Phaser.Scene {
     })
   }
 
-  private drawCaptureRing(path: readonly Point[]): void {
-    const firstPoint = path[0]
-    if (!firstPoint) {
-      return
-    }
-
-    const ring = this.add.graphics().setDepth(22)
-    for (const style of [
-      { width: 15, color: 0x55e6d1, alpha: 0.2 },
-      { width: 5, color: 0xfff8e7, alpha: 0.95 },
-    ]) {
-      ring.lineStyle(style.width, style.color, style.alpha)
-      ring.beginPath()
-      ring.moveTo(firstPoint.x, firstPoint.y)
-      for (let index = 1; index < path.length; index += 1) {
-        const point = path[index]!
-        ring.lineTo(point.x, point.y)
-      }
-      ring.strokePath()
-    }
+  private drawCaptureBurst(center: Point): void {
+    const ring = this.add
+      .circle(center.x, center.y, JUDGEMENT_RADIUS + 10, 0x55e6d1, 0.08)
+      .setStrokeStyle(8, 0xffd76a, 1)
+      .setDepth(22)
 
     this.tweens.add({
       targets: ring,
+      scale: 1.45,
       alpha: 0,
-      duration: CAPTURE_EFFECT_DURATION_MS,
-      ease: 'Quad.Out',
+      duration: 240,
+      ease: 'Back.Out',
       onComplete: () => ring.destroy(),
     })
   }
@@ -1408,14 +1490,9 @@ export class PrototypeScene extends Phaser.Scene {
       return
     }
 
-    const isClosingCapture =
-      calculatePathLength(this.path) >= JUDGEMENT_RADIUS * 3 &&
-      isPathClosed(this.path, CAPTURE_CLOSURE_TOLERANCE)
-    const coreColor = isClosingCapture ? 0xffd76a : 0xfff8e7
-
     for (const style of [
       { width: 15, color: 0x55e6d1, alpha: 0.2 },
-      { width: 5, color: coreColor, alpha: 0.95 },
+      { width: 5, color: 0xfff8e7, alpha: 0.95 },
     ]) {
       this.trail.lineStyle(style.width, style.color, style.alpha)
       this.trail.beginPath()
@@ -1430,13 +1507,9 @@ export class PrototypeScene extends Phaser.Scene {
     }
 
     const finalPoint = this.path.at(-1)!
-    this.trail.fillStyle(coreColor, 1)
-    this.trail.fillCircle(first.x, first.y, isClosingCapture ? 7 : 4)
-    this.trail.fillCircle(finalPoint.x, finalPoint.y, isClosingCapture ? 7 : 4)
-    if (isClosingCapture) {
-      this.trail.lineStyle(3, 0xffd76a, 0.85)
-      this.trail.strokeCircle(first.x, first.y, 13)
-    }
+    this.trail.fillStyle(0xfff8e7, 1)
+    this.trail.fillCircle(first.x, first.y, 4)
+    this.trail.fillCircle(finalPoint.x, finalPoint.y, 4)
   }
 
   private toPoint(pointer: Phaser.Input.Pointer): Point {

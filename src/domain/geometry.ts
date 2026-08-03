@@ -577,6 +577,25 @@ function squaredDistanceFromPointToSegment(
   return squaredDistance(point, closestPoint);
 }
 
+/** Returns the shortest finite distance from a point to a segment. */
+export function calculateDistanceFromPointToSegment(
+  point: Point,
+  segmentStart: Point,
+  segmentEnd: Point,
+): number {
+  assertFinitePoint(point, "point");
+  assertFinitePoint(segmentStart, "segmentStart");
+  assertFinitePoint(segmentEnd, "segmentEnd");
+
+  return Math.sqrt(
+    squaredDistanceFromPointToSegment(
+      point,
+      segmentStart,
+      segmentEnd,
+    ),
+  );
+}
+
 /**
  * Returns whether a valid closed path surrounds the complete judgement
  * circle, rather than merely containing its center.
@@ -661,6 +680,123 @@ function getSegmentLineValues(
     squaredLength,
     projection,
     perpendicularDistance,
+  };
+}
+
+/**
+ * Extends the intent line through two gesture points to the judgement circle.
+ *
+ * Unlike `findFirstCircleCrossingChord`, the supplied finite segment does not
+ * need to cover both circumference intersections. Callers must separately
+ * verify that the real pointer path came close enough to the target and was a
+ * deliberate swipe. `tangentInset` rejects nearly tangent cuts that would
+ * create an imperceptibly small piece.
+ */
+export function extendLineToCircleChord(
+  lineStart: Point,
+  lineEnd: Point,
+  circle: Circle,
+  tangentInset = 0,
+): CircleCrossingChord | null {
+  assertNonNegativeFinite(tangentInset, "tangentInset");
+
+  const {
+    segmentX,
+    segmentY,
+    squaredLength,
+    projection,
+    perpendicularDistance,
+  } = getSegmentLineValues(lineStart, lineEnd, circle);
+  const maximumDistance = circle.radius - tangentInset;
+
+  if (
+    maximumDistance <= 0 ||
+    perpendicularDistance >= maximumDistance - GEOMETRY_EPSILON
+  ) {
+    return null;
+  }
+
+  const halfChordParameter = Math.sqrt(
+    Math.max(
+      0,
+      circle.radius * circle.radius -
+        perpendicularDistance * perpendicularDistance,
+    ) / squaredLength,
+  );
+  const firstParameter = projection - halfChordParameter;
+  const secondParameter = projection + halfChordParameter;
+
+  return {
+    entryPoint: {
+      x: lineStart.x + segmentX * firstParameter,
+      y: lineStart.y + segmentY * firstParameter,
+    },
+    exitPoint: {
+      x: lineStart.x + segmentX * secondParameter,
+      y: lineStart.y + segmentY * secondParameter,
+    },
+  };
+}
+
+/**
+ * Extends each endpoint of a finite gesture segment by at most the supplied
+ * distance, then returns its full circle chord. This keeps lenient slicing
+ * forgiving near either boundary without turning a one-sided stroke into an
+ * infinite line through the whole target.
+ */
+export function extendSegmentToCircleChord(
+  segmentStart: Point,
+  segmentEnd: Point,
+  circle: Circle,
+  endpointExtension: number,
+  tangentInset = 0,
+): CircleCrossingChord | null {
+  assertNonNegativeFinite(endpointExtension, "endpointExtension");
+  assertNonNegativeFinite(tangentInset, "tangentInset");
+
+  const {
+    segmentX,
+    segmentY,
+    squaredLength,
+    projection,
+    perpendicularDistance,
+  } = getSegmentLineValues(segmentStart, segmentEnd, circle);
+  const maximumDistance = circle.radius - tangentInset;
+
+  if (
+    maximumDistance <= 0 ||
+    perpendicularDistance >= maximumDistance - GEOMETRY_EPSILON
+  ) {
+    return null;
+  }
+
+  const halfChordParameter = Math.sqrt(
+    Math.max(
+      0,
+      circle.radius * circle.radius -
+        perpendicularDistance * perpendicularDistance,
+    ) / squaredLength,
+  );
+  const firstParameter = projection - halfChordParameter;
+  const secondParameter = projection + halfChordParameter;
+  const extensionParameter = endpointExtension / Math.sqrt(squaredLength);
+
+  if (
+    firstParameter < -extensionParameter - GEOMETRY_EPSILON ||
+    secondParameter > 1 + extensionParameter + GEOMETRY_EPSILON
+  ) {
+    return null;
+  }
+
+  return {
+    entryPoint: {
+      x: segmentStart.x + segmentX * firstParameter,
+      y: segmentStart.y + segmentY * firstParameter,
+    },
+    exitPoint: {
+      x: segmentStart.x + segmentX * secondParameter,
+      y: segmentStart.y + segmentY * secondParameter,
+    },
   };
 }
 

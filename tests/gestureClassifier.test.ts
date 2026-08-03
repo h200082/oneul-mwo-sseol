@@ -34,7 +34,7 @@ describe('calculatePathLength', () => {
 })
 
 describe('classifyGesture', () => {
-  it('classifies an open center crossing as a perfect slice', () => {
+  it('keeps a full boundary crossing as a strict perfect slice', () => {
     const decision = classifyGesture(
       [
         { x: -80, y: 0 },
@@ -45,6 +45,7 @@ describe('classifyGesture', () => {
 
     expect(decision.kind).toBe('slice')
     if (decision.kind === 'slice') {
+      expect(decision.source).toBe('strict')
       expect(decision.result.accuracyScore).toBeCloseTo(100, 12)
       expect(decision.chord).toEqual({
         entryPoint: { x: -50, y: 0 },
@@ -53,90 +54,198 @@ describe('classifyGesture', () => {
     }
   })
 
-  it('classifies a simple loop around the full judgement circle as capture', () => {
+  it('extends an outside-to-inside swipe through the full judgement circle', () => {
     const decision = classifyGesture(
-      createLoop(72),
+      [
+        { x: -80, y: 0 },
+        { x: 25, y: 0 },
+      ],
       JUDGEMENT_CIRCLE,
     )
 
-    expect(decision.kind).toBe('capture')
-    expect(decision.metrics.containsJudgementCircle).toBe(true)
+    expect(decision).toMatchObject({ kind: 'slice', source: 'extended' })
+    if (decision.kind === 'slice') {
+      expect(decision.chord.entryPoint.x).toBeCloseTo(-50, 12)
+      expect(decision.chord.entryPoint.y).toBeCloseTo(0, 12)
+      expect(decision.chord.exitPoint.x).toBeCloseTo(50, 12)
+      expect(decision.chord.exitPoint.y).toBeCloseTo(0, 12)
+    }
   })
 
-  it('reports a capture-limit attempt without consuming it as a slice', () => {
+  it('accepts a deliberate swipe whose endpoints both remain inside', () => {
     const decision = classifyGesture(
-      createLoop(72),
+      [
+        { x: -20, y: 0 },
+        { x: 20, y: 0 },
+      ],
       JUDGEMENT_CIRCLE,
-      { captureAvailable: false },
     )
 
     expect(decision).toMatchObject({
-      kind: 'invalid',
-      reason: 'capture-limit',
+      kind: 'slice',
+      source: 'extended',
     })
+    if (decision.kind === 'slice') {
+      expect(decision.result.accuracyScore).toBeCloseTo(100, 12)
+    }
   })
 
-  it('rejects a closed path that contains only the center', () => {
-    const narrowLoop: Point[] = [
-      { x: -70, y: -12 },
-      { x: 70, y: -12 },
-      { x: 70, y: 12 },
-      { x: -70, y: 12 },
-      { x: -70, y: -12 },
-    ]
-
+  it('scores an extended offset swipe with the existing area formula', () => {
     const decision = classifyGesture(
-      narrowLoop,
+      [
+        { x: -20, y: 25 },
+        { x: 20, y: 25 },
+      ],
       JUDGEMENT_CIRCLE,
-      {
-        minimumCaptureArea: 0,
-        minimumCapturePathLength: 0,
-      },
     )
+    const expectedRatio =
+      (Math.acos(0.5) - 0.5 * Math.sqrt(1 - 0.5 ** 2)) / Math.PI
 
-    expect(decision).toMatchObject({
-      kind: 'invalid',
-      reason: 'closed-invalid',
-    })
-    expect(decision.metrics.containsJudgementCircle).toBe(false)
+    expect(decision.kind).toBe('slice')
+    if (decision.kind === 'slice') {
+      expect(decision.source).toBe('extended')
+      expect(decision.result.smallerAreaRatio).toBeCloseTo(expectedRatio, 12)
+    }
   })
 
-  it('never reclassifies an invalid closed loop as a slice', () => {
-    const crossingLoop: Point[] = [
-      { x: -80, y: 0 },
-      { x: 0, y: 18 },
-      { x: 80, y: 0 },
-      { x: 0, y: -18 },
-      { x: -80, y: 0 },
+  it('accepts a swipe released just before the opposite circumference', () => {
+    expect(
+      classifyGesture(
+        [
+          { x: -100, y: 0 },
+          { x: 42, y: 0 },
+        ],
+        JUDGEMENT_CIRCLE,
+      ),
+    ).toMatchObject({ kind: 'slice', source: 'extended' })
+  })
+
+  it('rejects a swipe that starts at one edge and only moves outward', () => {
+    expect(
+      classifyGesture(
+        [
+          { x: 50, y: 0 },
+          { x: 86, y: 0 },
+        ],
+        JUDGEMENT_CIRCLE,
+      ),
+    ).toMatchObject({ kind: 'invalid', reason: 'open-no-crossing' })
+  })
+
+  it('rejects a same-side inside swipe that cannot reach both edges', () => {
+    expect(
+      classifyGesture(
+        [
+          { x: 10, y: 0 },
+          { x: 42, y: 0 },
+        ],
+        JUDGEMENT_CIRCLE,
+      ),
+    ).toMatchObject({ kind: 'invalid', reason: 'open-no-crossing' })
+  })
+
+  it('rejects a collinear swipe that remains outside the hit slop', () => {
+    expect(
+      classifyGesture(
+        [
+          { x: -100, y: 0 },
+          { x: -60, y: 0 },
+        ],
+        JUDGEMENT_CIRCLE,
+      ),
+    ).toMatchObject({ kind: 'invalid', reason: 'open-no-crossing' })
+  })
+
+  it('rejects a short scratch inside the food', () => {
+    expect(
+      classifyGesture(
+        [
+          { x: -5, y: 0 },
+          { x: 5, y: 0 },
+        ],
+        JUDGEMENT_CIRCLE,
+      ),
+    ).toMatchObject({ kind: 'invalid', reason: 'too-short' })
+  })
+
+  it('rejects a nearly tangent swipe', () => {
+    expect(
+      classifyGesture(
+        [
+          { x: -40, y: 50 },
+          { x: 40, y: 50 },
+        ],
+        JUDGEMENT_CIRCLE,
+      ),
+    ).toMatchObject({ kind: 'invalid', reason: 'open-no-crossing' })
+  })
+
+  it('rejects a winding stroke whose maximum span is not straight enough', () => {
+    const windingPath: Point[] = [
+      { x: -35, y: 0 },
+      { x: -10, y: 45 },
+      { x: 10, y: -45 },
+      { x: 35, y: 0 },
     ]
 
     expect(
-      classifyGesture(crossingLoop, JUDGEMENT_CIRCLE),
-    ).toMatchObject({
-      kind: 'invalid',
-      reason: 'closed-invalid',
-    })
+      classifyGesture(windingPath, JUDGEMENT_CIRCLE),
+    ).toMatchObject({ kind: 'invalid', reason: 'open-no-crossing' })
   })
 
-  it('rejects a self-intersecting capture path', () => {
-    const figureEight: Point[] = [
-      { x: -80, y: -60 },
-      { x: 80, y: 60 },
-      { x: -80, y: 60 },
-      { x: 80, y: -60 },
-      { x: -80, y: -60 },
-    ]
-
-    const decision = classifyGesture(figureEight, JUDGEMENT_CIRCLE)
+  it('treats a drawn loop as invalid instead of capture or slice', () => {
+    const decision = classifyGesture(createLoop(72), JUDGEMENT_CIRCLE)
 
     expect(decision).toMatchObject({
       kind: 'invalid',
       reason: 'closed-invalid',
     })
-    expect(decision.metrics.isSimpleCapturePath).toBe(false)
   })
 
-  it('reports an open miss separately from an invalid loop', () => {
+  it('preserves swipe direction in the inferred chord', () => {
+    const decision = classifyGesture(
+      [
+        { x: 20, y: 0 },
+        { x: -20, y: 0 },
+      ],
+      JUDGEMENT_CIRCLE,
+    )
+
+    expect(decision).toMatchObject({
+      kind: 'slice',
+      chord: {
+        entryPoint: { x: 50, y: 0 },
+        exitPoint: { x: -50, y: 0 },
+      },
+    })
+  })
+
+  it('uses the visible pointer direction while retaining moving-target contact', () => {
+    const decision = classifyGesture(
+      [
+        { x: -35, y: 0 },
+        { x: 35, y: -18 },
+      ],
+      JUDGEMENT_CIRCLE,
+      {
+        intentPath: [
+          { x: 220, y: 410 },
+          { x: 290, y: 410 },
+        ],
+      },
+    )
+
+    expect(decision.kind).toBe('slice')
+    if (decision.kind === 'slice') {
+      expect(decision.chord.exitPoint.y).toBeCloseTo(
+        decision.chord.entryPoint.y,
+      )
+      expect(decision.chord.entryPoint.x).toBeLessThan(0)
+      expect(decision.chord.exitPoint.x).toBeGreaterThan(0)
+    }
+  })
+
+  it('reports a distant open miss', () => {
     expect(
       classifyGesture(
         [
