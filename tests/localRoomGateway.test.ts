@@ -806,6 +806,6 @@ async function createStartedRoom(gateway: LocalRoomGateway) {
     requesterPlayerId: 'host',
     deckSeed: 'shared-seed',
     contentVersion: 'menus-v1',
-    startAt: 1,
+    startAt: Date.now(),
   })
 }

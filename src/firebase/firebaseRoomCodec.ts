@@ -1,16 +1,19 @@
 import {
   MAX_ROOM_PLAYERS,
   ROOM_CODE_ALPHABET,
+  ROOM_RESULT_WINDOW_MS,
   createRoom,
   joinRoom,
   startRoom,
   type Room,
   type RoomDeckSeed,
+  type StartedRoom,
   type RoomRandomSource,
 } from '../domain/room'
 import { normalizeRoomCode } from '../rooms/roomInvite'
 
-export const FIRESTORE_ROOM_SCHEMA_VERSION = 1
+export const FIRESTORE_ROOM_LATEST_SCHEMA_VERSION = 2
+export const FIRESTORE_ROOM_WRITE_SCHEMA_VERSION: 1 | 2 = 1
 
 export interface FirestorePlayerValue {
   readonly nickname: string
@@ -20,11 +23,12 @@ export interface FirestoreStartValue {
   readonly deckSeed: RoomDeckSeed
   readonly contentVersion: string
   readonly startAt: number
+  readonly resultDeadlineAt?: number
   readonly rosterIds: readonly string[]
 }
 
 export interface FirestoreRoomValue {
-  readonly schemaVersion: typeof FIRESTORE_ROOM_SCHEMA_VERSION
+  readonly schemaVersion: 1 | typeof FIRESTORE_ROOM_LATEST_SCHEMA_VERSION
   readonly code: string
   readonly mealTime: 'lunch' | 'dinner'
   readonly status: 'waiting' | 'started'
@@ -35,6 +39,7 @@ export interface FirestoreRoomValue {
 }
 
 export function encodeFirestoreRoom(room: Room): FirestoreRoomValue {
+  const schemaVersion = FIRESTORE_ROOM_WRITE_SCHEMA_VERSION
   const memberIds = room.players.map((player) => player.playerId)
   const players = Object.fromEntries(
     room.players.map((player) => [
@@ -44,7 +49,7 @@ export function encodeFirestoreRoom(room: Room): FirestoreRoomValue {
   )
 
   return Object.freeze({
-    schemaVersion: FIRESTORE_ROOM_SCHEMA_VERSION,
+    schemaVersion,
     code: room.code,
     mealTime: room.mealTime,
     status: room.status,
@@ -53,16 +58,31 @@ export function encodeFirestoreRoom(room: Room): FirestoreRoomValue {
     players: Object.freeze(players),
     start:
       room.status === 'started'
-        ? Object.freeze({
-            deckSeed: room.start.deckSeed,
-            contentVersion: room.start.contentVersion,
-            startAt: room.start.startAt,
-            rosterIds: Object.freeze(
-              room.start.roster.map((player) => player.playerId),
-            ),
-          })
+        ? encodeFirestoreStart(room, schemaVersion)
         : null,
   })
+}
+
+function encodeFirestoreStart(
+  room: StartedRoom,
+  schemaVersion: 1 | 2,
+): Readonly<FirestoreStartValue> {
+  const shared = {
+    deckSeed: room.start.deckSeed,
+    contentVersion: room.start.contentVersion,
+    startAt: room.start.startAt,
+    rosterIds: Object.freeze(
+      room.start.roster.map((player) => player.playerId),
+    ),
+  }
+  return Object.freeze(
+    schemaVersion === 2
+      ? {
+          ...shared,
+          resultDeadlineAt: room.start.resultDeadlineAt,
+        }
+      : shared,
+  )
 }
 
 export function decodeFirestoreRoom(
@@ -105,7 +125,10 @@ export function decodeFirestoreRoom(
     return room
   }
 
-  const start = readStartValue(stored.start)
+  const start = stored.start
+  if (start === null) {
+    throw new Error('A started Firestore room requires start data.')
+  }
   if (
     start.rosterIds.length !== stored.memberIds.length ||
     start.rosterIds.some(
@@ -115,12 +138,16 @@ export function decodeFirestoreRoom(
     throw new Error('Firestore start roster does not match memberIds.')
   }
 
-  return startRoom(room, {
+  const startedRoom = startRoom(room, {
     requesterPlayerId: stored.hostPlayerId,
     deckSeed: start.deckSeed,
     contentVersion: start.contentVersion,
     startAt: start.startAt,
   })
+  if (startedRoom.start.resultDeadlineAt !== start.resultDeadlineAt) {
+    throw new Error('Firestore result deadline does not match the shared rule.')
+  }
+  return startedRoom
 }
 
 function readRoomValue(value: unknown): FirestoreRoomValue {
@@ -140,7 +167,8 @@ function readRoomValue(value: unknown): FirestoreRoomValue {
   } = value
 
   if (
-    schemaVersion !== FIRESTORE_ROOM_SCHEMA_VERSION ||
+    (schemaVersion !== 1 &&
+      schemaVersion !== FIRESTORE_ROOM_LATEST_SCHEMA_VERSION) ||
     typeof code !== 'string' ||
     (mealTime !== 'lunch' && mealTime !== 'dinner') ||
     (status !== 'waiting' && status !== 'started') ||
@@ -169,7 +197,8 @@ function readRoomValue(value: unknown): FirestoreRoomValue {
         readPlayerValue(player),
       ]),
     ),
-    start: start === null ? null : readStartValue(start),
+    start:
+      start === null ? null : readStartValue(start, schemaVersion),
   }
 }
 
@@ -180,16 +209,28 @@ function readPlayerValue(value: unknown): FirestorePlayerValue {
   return { nickname: value.nickname }
 }
 
-function readStartValue(value: unknown): FirestoreStartValue {
+function readStartValue(
+  value: unknown,
+  schemaVersion: 1 | 2,
+): FirestoreStartValue {
   if (!isRecord(value)) {
     throw new Error('A started Firestore room requires start data.')
   }
 
-  const { deckSeed, contentVersion, startAt, rosterIds } = value
+  const {
+    deckSeed,
+    contentVersion,
+    startAt,
+    resultDeadlineAt,
+    rosterIds,
+  } = value
   if (
     (typeof deckSeed !== 'string' && typeof deckSeed !== 'number') ||
     typeof contentVersion !== 'string' ||
     typeof startAt !== 'number' ||
+    (resultDeadlineAt !== undefined &&
+      typeof resultDeadlineAt !== 'number') ||
+    (schemaVersion === 2 && resultDeadlineAt === undefined) ||
     !Array.isArray(rosterIds) ||
     rosterIds.some((playerId) => typeof playerId !== 'string')
   ) {
@@ -200,6 +241,8 @@ function readStartValue(value: unknown): FirestoreStartValue {
     deckSeed,
     contentVersion,
     startAt,
+    resultDeadlineAt:
+      resultDeadlineAt ?? startAt + ROOM_RESULT_WINDOW_MS,
     rosterIds: rosterIds as string[],
   }
 }

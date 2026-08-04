@@ -2,6 +2,8 @@ export const MIN_ROOM_PLAYERS = 2;
 export const MAX_ROOM_PLAYERS = 8;
 export const MAX_NICKNAME_LENGTH = 16;
 export const ROOM_CODE_LENGTH = 8;
+export const ROOM_RESULT_WINDOW_MS = 180_000;
+export const ROOM_RESULT_SYNC_GRACE_MS = 5_000;
 
 /**
  * Uppercase letters and digits with 0, 1, I, L, and O removed so a room code
@@ -75,6 +77,10 @@ export interface RoomStartSnapshot {
    * Shared Unix timestamp in milliseconds.
    */
   readonly startAt: number;
+  /**
+   * Shared cutoff after which missing submissions become DNF results.
+   */
+  readonly resultDeadlineAt: number;
   /**
    * Immutable roster in the exact order used by the game and result screen.
    */
@@ -365,11 +371,19 @@ export function startRoom(
     options.contentVersion,
   );
   const startAt = validateStartAt(options.startAt);
+  const resultDeadlineAt = startAt + ROOM_RESULT_WINDOW_MS;
+  if (!Number.isSafeInteger(resultDeadlineAt)) {
+    throw roomError(
+      "INVALID_START_AT",
+      "The derived result deadline must be a safe integer timestamp.",
+    );
+  }
   const roster = freezePlayers(room.players);
   const start = Object.freeze({
     deckSeed,
     contentVersion,
     startAt,
+    resultDeadlineAt,
     roster,
   });
 
@@ -457,7 +471,7 @@ function normalizeContentVersion(contentVersion: string): string {
 function validateStartAt(startAt: number): number {
   if (
     !Number.isFinite(startAt) ||
-    !Number.isInteger(startAt) ||
+    !Number.isSafeInteger(startAt) ||
     startAt < 0
   ) {
     throw roomError(

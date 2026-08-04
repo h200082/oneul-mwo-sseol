@@ -16,6 +16,11 @@ export type RoomResultsListener = (
 ) => void
 export type RoomResultsErrorListener = (error: unknown) => void
 
+export interface AuthoritativeRoomResultState {
+  readonly finalization: 'open' | 'closed'
+  readonly results: readonly RoomResultSubmission[]
+}
+
 /**
  * A small invalidation channel. The room itself always comes from Storage so
  * notifications cannot become a second, conflicting source of truth.
@@ -49,6 +54,9 @@ export interface RoomGateway {
     roomCode: string,
     submission: RoomResultSubmission,
   ): Promise<readonly RoomResultSubmission[]>
+  readAuthoritativeResultState(
+    roomCode: string,
+  ): Promise<Readonly<AuthoritativeRoomResultState>>
   subscribeResults(
     roomCode: string,
     listener: RoomResultsListener,

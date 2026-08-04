@@ -1,6 +1,8 @@
 import QRCode from 'qrcode'
 
 import {
+  ROOM_RESULT_SYNC_GRACE_MS,
+  ROOM_RESULT_WINDOW_MS,
   canStartRoom,
   normalizeNickname,
   type MealTime,
@@ -9,11 +11,11 @@ import {
   type WaitingRoom,
 } from '../domain/room'
 import { createRandomUuid } from '../domain/randomUuid'
+import type { RoomResultSubmission } from '../domain/roomResults'
 import {
-  aggregateRoomResults,
-  type RoomResultSubmission,
-  type RoomResultsSummary,
-} from '../domain/roomResults'
+  resolveRoomResults,
+  type FinalRoomResultsSummary,
+} from '../domain/roomResultResolution'
 import { MENU_CATALOG, type MenuItem } from '../data/menus'
 import { getMenuVisual } from '../data/menuVisuals'
 import type {
@@ -25,7 +27,10 @@ import {
   scanRoomCodeFromCamera,
 } from '../qr/QrScannerService'
 import { LocalRoomGateway } from '../rooms/LocalRoomGateway'
-import type { RoomGateway } from '../rooms/RoomGateway'
+import type {
+  AuthoritativeRoomResultState,
+  RoomGateway,
+} from '../rooms/RoomGateway'
 import {
   buildRoomInviteUrl,
   normalizeRoomCode,
@@ -37,6 +42,8 @@ const PLAYER_ID_STORAGE_KEY = 'oneul-mwo-sseol-player-id'
 const NICKNAME_STORAGE_KEY = 'oneul-mwo-sseol-nickname'
 const CONTENT_VERSION = 'menus-v1'
 const ROOM_COUNTDOWN_MS = 3_000
+const RESULT_COUNTDOWN_REFRESH_MS = 1_000
+const RESULT_FINALIZATION_RETRY_MS = 2_000
 
 const MENU_BY_ID = new Map(MENU_CATALOG.map((menu) => [menu.id, menu]))
 
@@ -75,10 +82,11 @@ export interface AppDebugState {
 
 interface ActiveRoomResultFlow {
   readonly room: StartedRoom
-  readonly submission: RoomResultSubmission
+  readonly submission: RoomResultSubmission | null
   readonly generation: number
   results: readonly RoomResultSubmission[]
   submissionPending: boolean
+  submissionTask: Promise<void> | null
   subscriptionPending: boolean
   submissionError: string | null
   subscriptionError: string | null
@@ -95,6 +103,8 @@ export class AppController {
   private unsubscribeResults: (() => void) | null = null
   private countdownInterval: number | null = null
   private gameStartTimeout: number | null = null
+  private resultDeadlineTimeout: number | null = null
+  private resultDeadlineInterval: number | null = null
   private currentRoom: Room | null = null
   private scheduledRoomKey: string | null = null
   private scannerAbortController: AbortController | null = null
@@ -461,14 +471,12 @@ export class AppController {
       }
       if (existingRoom?.status === 'started') {
         this.assertCanResumeStartedRoom(existingRoom)
-        const initialResults = await readFirstRoomResults(
-          this.roomGateway,
-          roomCode,
-        )
+        const resultState =
+          await this.roomGateway.readAuthoritativeResultState(roomCode)
         if (!this.isCurrentHomeAction(action, generation)) {
           return
         }
-        await this.resumeStartedRoom(existingRoom, initialResults)
+        await this.resumeStartedRoom(existingRoom, resultState)
         return
       }
 
@@ -489,14 +497,12 @@ export class AppController {
         }
         this.assertCanResumeStartedRoom(latestRoom)
 
-        const initialResults = await readFirstRoomResults(
-          this.roomGateway,
-          roomCode,
-        )
+        const resultState =
+          await this.roomGateway.readAuthoritativeResultState(roomCode)
         if (!this.isCurrentHomeAction(action, generation)) {
           return
         }
-        await this.resumeStartedRoom(latestRoom, initialResults)
+        await this.resumeStartedRoom(latestRoom, resultState)
         return
       }
 
@@ -773,6 +779,7 @@ export class AppController {
         deckSeed: room.start.deckSeed,
         roomCode: room.code,
       })
+      this.scheduleRoomResultDeadline(room)
     }, delay)
   }
 
@@ -780,6 +787,7 @@ export class AppController {
     this.viewGeneration += 1
     this.cleanupRoomSubscription()
     this.cleanupResultSubscription()
+    this.clearRoomResultDeadline()
     this.activeRoomResultFlow = null
     this.clearCountdown()
     this.screenRoot.hidden = true
@@ -808,7 +816,7 @@ export class AppController {
 
   private async resumeStartedRoom(
     room: StartedRoom,
-    initialResults: readonly RoomResultSubmission[],
+    resultState: Readonly<AuthoritativeRoomResultState>,
   ): Promise<void> {
     this.assertCanResumeStartedRoom(room)
 
@@ -817,16 +825,17 @@ export class AppController {
     window.history.replaceState({}, '', roomUrl)
     this.currentRoom = room
 
-    const ownResult = initialResults.find(
+    const ownResult = resultState.results.find(
       (result) => result.playerId === this.playerId,
     )
-    if (!ownResult) {
+    if (resultState.finalization === 'open' && !ownResult) {
       this.startGame({
         mode: 'room',
         mealTime: room.mealTime,
         deckSeed: room.start.deckSeed,
         roomCode: room.code,
       })
+      this.scheduleRoomResultDeadline(room)
       return
     }
 
@@ -839,17 +848,25 @@ export class AppController {
 
     const flow: ActiveRoomResultFlow = {
       room,
-      submission: ownResult,
+      submission: ownResult ?? null,
       generation,
       results: [],
       submissionPending: false,
+      submissionTask: null,
       subscriptionPending: false,
       submissionError: null,
       subscriptionError: null,
       complete: false,
     }
     this.activeRoomResultFlow = flow
-    this.handleRoomResultsSnapshot(flow, initialResults)
+    if (resultState.finalization === 'open') {
+      this.scheduleRoomResultDeadline(room)
+    }
+    this.handleRoomResultsSnapshot(
+      flow,
+      resultState.results,
+      resultState.finalization === 'closed',
+    )
 
     if (!flow.complete && this.isActiveResultFlow(flow)) {
       await this.subscribeToRoomResults(flow)
@@ -899,6 +916,7 @@ export class AppController {
       generation,
       results: [],
       submissionPending: false,
+      submissionTask: null,
       subscriptionPending: false,
       submissionError: null,
       subscriptionError: null,
@@ -970,7 +988,9 @@ export class AppController {
     if (
       !this.isActiveResultFlow(flow) ||
       flow.submissionPending ||
-      flow.complete
+      flow.submissionTask !== null ||
+      flow.complete ||
+      !flow.submission
     ) {
       return
     }
@@ -979,86 +999,205 @@ export class AppController {
     flow.submissionError = null
     this.renderRoomResultWaiting(flow)
 
-    try {
-      const results = await this.roomGateway.submitResult(
-        flow.room.code,
-        flow.submission,
-      )
-      if (this.isActiveResultFlow(flow)) {
-        this.handleRoomResultsSnapshot(flow, results)
-      }
-    } catch (error) {
-      if (this.isActiveResultFlow(flow)) {
-        flow.submissionError =
-          `결과 제출 실패: ${toUserMessage(error)}`
-      }
-    } finally {
-      if (this.isActiveResultFlow(flow)) {
-        flow.submissionPending = false
-        if (!flow.complete) {
-          this.renderRoomResultWaiting(flow)
+    const submissionTask = this.roomGateway
+      .submitResult(flow.room.code, flow.submission)
+      .then((results) => {
+        if (this.isActiveResultFlow(flow)) {
+          this.handleRoomResultsSnapshot(flow, results)
         }
-      }
+      })
+      .catch((error: unknown) => {
+        if (this.isActiveResultFlow(flow)) {
+          flow.submissionError =
+            `결과 제출 실패: ${toUserMessage(error)}`
+        }
+      })
+      .finally(() => {
+        if (this.isActiveResultFlow(flow)) {
+          flow.submissionPending = false
+          if (!flow.complete) {
+            this.renderRoomResultWaiting(flow)
+          }
+        }
+      })
+
+    flow.submissionTask = submissionTask
+    await submissionTask
+    if (
+      this.isActiveResultFlow(flow) &&
+      flow.submissionTask === submissionTask
+    ) {
+      flow.submissionTask = null
     }
   }
 
   private handleRoomResultsSnapshot(
     flow: ActiveRoomResultFlow,
     results: readonly RoomResultSubmission[],
+    finalizeMissing = false,
   ): void {
     if (!this.isActiveResultFlow(flow) || flow.complete) {
       return
     }
 
-    const rosterIds = new Set(
-      flow.room.start.roster.map((player) => player.playerId),
+    const resolution = resolveRoomResults(
+      flow.room.start.roster,
+      results,
+      flow.room.start.resultDeadlineAt,
+      finalizeMissing,
     )
-    const submissionByPlayer = new Map<string, RoomResultSubmission>()
+    flow.results = resolution.receivedResults
 
-    for (const result of results) {
-      if (
-        rosterIds.has(result.playerId) &&
-        !submissionByPlayer.has(result.playerId)
-      ) {
-        submissionByPlayer.set(result.playerId, result)
-      }
-    }
-
-    flow.results = flow.room.start.roster
-      .map((player) => submissionByPlayer.get(player.playerId))
-      .filter(
-        (result): result is RoomResultSubmission =>
-          result !== undefined,
-      )
-
-    if (flow.results.length < flow.room.start.roster.length) {
+    if (!resolution.isFinal || !resolution.summary) {
       flow.complete = false
       this.renderRoomResultWaiting(flow)
       return
     }
 
-    const summary = aggregateRoomResults(
-      flow.room.start.roster.map((player) => {
-        const result = submissionByPlayer.get(player.playerId)
-        if (!result) {
-          throw new Error(
-            `잠긴 참가자 ${player.playerId}의 결과가 없습니다.`,
-          )
-        }
-
-        return {
-          playerId: player.playerId,
-          displayName: player.nickname,
-          rosterOrder: player.rosterOrder,
-          score: result.score,
-          capturedMenuIds: result.capturedMenuIds,
-        }
-      }),
-    )
-
     flow.complete = true
     this.cleanupResultSubscription()
-    this.renderRoomResultsSummary(flow.room, summary)
+    this.clearRoomResultDeadline()
+    this.renderRoomResultsSummary(flow.room, resolution.summary)
+  }
+
+  private async handleRoomResultDeadline(
+    room: StartedRoom,
+  ): Promise<void> {
+    if (!this.isCurrentStartedRoom(room)) {
+      return
+    }
+
+    const initialFlow = this.activeRoomResultFlow
+    if (initialFlow?.complete) {
+      return
+    }
+    if (initialFlow?.submissionTask) {
+      await initialFlow.submissionTask
+    }
+    if (
+      !this.isCurrentStartedRoom(room) ||
+      this.activeRoomResultFlow?.complete
+    ) {
+      return
+    }
+
+    try {
+      const resultState =
+        await this.roomGateway.readAuthoritativeResultState(room.code)
+      if (!this.isCurrentStartedRoom(room)) {
+        return
+      }
+
+      let flow = this.activeRoomResultFlow
+      if (resultState.finalization === 'open') {
+        if (flow && this.isActiveResultFlow(flow) && !flow.complete) {
+          this.handleRoomResultsSnapshot(flow, resultState.results)
+        }
+        if (!flow?.complete) {
+          this.scheduleRoomResultFinalizationRetry(room)
+        }
+        return
+      }
+
+      if (!flow || !this.isActiveResultFlow(flow)) {
+        this.gameHost.stop()
+        this.cleanupRoomSubscription()
+        this.cleanupResultSubscription()
+        this.clearCountdown()
+        const generation = ++this.viewGeneration
+        this.screenRoot.hidden = false
+        flow = {
+          room,
+          submission: null,
+          generation,
+          results: [],
+          submissionPending: false,
+          submissionTask: null,
+          subscriptionPending: false,
+          submissionError: null,
+          subscriptionError: null,
+          complete: false,
+        }
+        this.activeRoomResultFlow = flow
+      }
+
+      flow.subscriptionError = null
+      this.handleRoomResultsSnapshot(flow, resultState.results, true)
+    } catch (error) {
+      if (!this.isCurrentStartedRoom(room)) {
+        return
+      }
+      const flow = this.activeRoomResultFlow
+      if (flow?.complete) {
+        return
+      }
+      if (flow && this.isActiveResultFlow(flow)) {
+        flow.subscriptionError =
+          `서버 마감 확인 오류: ${toUserMessage(error)}`
+        this.renderRoomResultWaiting(flow)
+      }
+      this.scheduleRoomResultFinalizationRetry(room)
+    }
+  }
+
+  private isCurrentStartedRoom(room: StartedRoom): boolean {
+    return Boolean(
+      this.currentRoom &&
+        this.currentRoom.status === 'started' &&
+        this.currentRoom.code === room.code &&
+        this.currentRoom.start.deckSeed === room.start.deckSeed,
+    )
+  }
+
+  private scheduleRoomResultDeadline(room: StartedRoom): void {
+    this.clearRoomResultDeadline()
+
+    this.resultDeadlineInterval = window.setInterval(() => {
+      const countdown = this.screenRoot.querySelector<HTMLElement>(
+        '[data-testid="result-deadline-countdown"]',
+      )
+      if (countdown) {
+        countdown.textContent = formatResultDeadlineRemaining(
+          room.start.resultDeadlineAt,
+        )
+      }
+    }, RESULT_COUNTDOWN_REFRESH_MS)
+
+    const estimatedDelay =
+      room.start.resultDeadlineAt +
+      ROOM_RESULT_SYNC_GRACE_MS -
+      Date.now()
+    const delay = Math.min(
+      Math.max(0, estimatedDelay),
+      ROOM_RESULT_WINDOW_MS +
+        ROOM_COUNTDOWN_MS +
+        ROOM_RESULT_SYNC_GRACE_MS,
+    )
+    this.resultDeadlineTimeout = window.setTimeout(() => {
+      void this.handleRoomResultDeadline(room)
+    }, delay)
+  }
+
+  private scheduleRoomResultFinalizationRetry(
+    room: StartedRoom,
+  ): void {
+    if (this.resultDeadlineTimeout !== null) {
+      window.clearTimeout(this.resultDeadlineTimeout)
+    }
+    this.resultDeadlineTimeout = window.setTimeout(() => {
+      void this.handleRoomResultDeadline(room)
+    }, RESULT_FINALIZATION_RETRY_MS)
+  }
+
+  private clearRoomResultDeadline(): void {
+    if (this.resultDeadlineTimeout !== null) {
+      window.clearTimeout(this.resultDeadlineTimeout)
+      this.resultDeadlineTimeout = null
+    }
+    if (this.resultDeadlineInterval !== null) {
+      window.clearInterval(this.resultDeadlineInterval)
+      this.resultDeadlineInterval = null
+    }
   }
 
   private renderRoomResultWaiting(
@@ -1074,6 +1213,8 @@ export class AppController {
     const submittedCount = submittedPlayerIds.size
     const totalCount = flow.room.start.roster.length
     const ownSubmitted = submittedPlayerIds.has(this.playerId)
+    const deadlineReached =
+      Date.now() >= flow.room.start.resultDeadlineAt
 
     this.screenRoot.innerHTML = `
       <div
@@ -1088,6 +1229,12 @@ export class AppController {
           }</p>
           <h1>친구들의 결과를 기다리는 중</h1>
           <p>잠긴 참가자 명단의 결과가 모두 도착하면 함께 공개돼요.</p>
+          <p class="result-deadline-copy">
+            마감까지 결과가 없으면 0점·빈 포획의 미완주로 처리해요.
+            <strong data-testid="result-deadline-countdown">${formatResultDeadlineRemaining(
+              flow.room.start.resultDeadlineAt,
+            )}</strong>
+          </p>
         </header>
 
         <section class="result-progress-card">
@@ -1146,8 +1293,16 @@ export class AppController {
         const submitted = submittedPlayerIds.has(player.playerId)
 
         name.textContent = player.nickname
-        state.textContent = submitted ? '제출 완료' : '플레이 중'
-        state.className = submitted ? 'is-submitted' : ''
+        state.textContent = submitted
+          ? '제출 완료'
+          : deadlineReached
+            ? '서버 마감 확인 중'
+            : '플레이 중'
+        state.className = submitted
+          ? 'is-submitted'
+          : deadlineReached
+            ? 'is-finalizing'
+            : ''
         item.append(name, state)
         return item
       }),
@@ -1158,7 +1313,9 @@ export class AppController {
     )
     submitStatus.textContent = flow.submissionError
       ? flow.submissionError
-      : flow.submissionPending
+      : flow.submission === null && deadlineReached
+        ? '서버에서 결과 마감을 확인하고 있어요.'
+        : flow.submissionPending
         ? '내 결과를 제출하고 있어요…'
         : ownSubmitted
           ? '내 결과 제출 완료'
@@ -1176,7 +1333,8 @@ export class AppController {
     const retrySubmit = this.query<HTMLButtonElement>(
       '[data-testid="retry-result-submit"]',
     )
-    retrySubmit.hidden = flow.submissionError === null
+    retrySubmit.hidden =
+      flow.submission === null || flow.submissionError === null
     retrySubmit.disabled = flow.submissionPending
     retrySubmit.addEventListener('click', () => {
       void this.submitActiveRoomResult(flow)
@@ -1200,8 +1358,9 @@ export class AppController {
 
   private renderRoomResultsSummary(
     room: StartedRoom,
-    summary: Readonly<RoomResultsSummary>,
+    summary: Readonly<FinalRoomResultsSummary>,
   ): void {
+    this.clearRoomResultDeadline()
     this.screenRoot.innerHTML = `
       <div
         class="app-screen room-results-screen"
@@ -1232,7 +1391,9 @@ export class AppController {
             <div>
               <span>WINNER PICKS</span>
               <h2>${
-                summary.winners.length === 1
+                summary.winners.length === 0
+                  ? '완주자 없음'
+                  : summary.winners.length === 1
                   ? '단독 1등 메뉴'
                   : '공동 1등 메뉴'
               }</h2>
@@ -1278,13 +1439,18 @@ export class AppController {
         const item = document.createElement('li')
         item.className = 'result-standing'
         item.dataset.testid = 'result-standing'
-        if (standing.rank === 1) {
+        if (standing.rank === 1 && !standing.didNotFinish) {
           item.classList.add('is-winner')
+        }
+        if (standing.didNotFinish) {
+          item.classList.add('is-dnf')
         }
 
         const rank = document.createElement('strong')
         rank.className = 'result-rank'
-        rank.textContent = standing.isScoreTied
+        rank.textContent = standing.didNotFinish
+          ? '미완주'
+          : standing.isScoreTied
           ? `공동 ${standing.rank}위`
           : `${standing.rank}위`
 
@@ -1293,7 +1459,9 @@ export class AppController {
         const name = document.createElement('strong')
         const score = document.createElement('span')
         name.textContent = standing.displayName
-        score.textContent = `${formatScore(standing.score)}점`
+        score.textContent = standing.didNotFinish
+          ? '미완주 · 0점'
+          : `${formatScore(standing.score)}점`
         player.append(name, score)
 
         const captures = document.createElement('div')
@@ -1330,6 +1498,12 @@ export class AppController {
         return card
       }),
     )
+    if (summary.winners.length === 0) {
+      const emptyWinner = document.createElement('p')
+      emptyWinner.className = 'result-empty-copy'
+      emptyWinner.textContent = '결과 마감 전 완주한 참가자가 없어요.'
+      winnerPicks.append(emptyWinner)
+    }
 
     const overlapSummary = this.query<HTMLElement>(
       '[data-testid="overlap-summary"]',
@@ -1383,7 +1557,10 @@ export class AppController {
     const soleWinner = summary.winners.length === 1
     const soleLastPlace = summary.lastPlaces.length === 1
 
-    if (soleWinner && soleLastPlace) {
+    if (summary.winners.length === 0) {
+      outcomeTitle.textContent = '전원 미완주 · 내기 없음'
+      outcomeCopy.textContent = '완주자가 없어 이번 식사 내기는 성립하지 않아요.'
+    } else if (soleWinner && soleLastPlace) {
       outcomeTitle.textContent = '꼴찌가 1등의 식사를 부담'
       outcomeCopy.textContent =
         `${summary.lastPlaces[0]!.displayName}님이 ` +
@@ -1453,6 +1630,7 @@ export class AppController {
   }
 
   private renderRoomResultFailure(message: string): void {
+    this.clearRoomResultDeadline()
     this.screenRoot.innerHTML = `
       <div class="app-screen results-waiting-screen">
         <header class="results-heading">
@@ -1550,6 +1728,7 @@ export class AppController {
     this.stopQrScanner()
     this.cleanupRoomSubscription()
     this.cleanupResultSubscription()
+    this.clearRoomResultDeadline()
     this.clearCountdown()
     this.activeRoomResultFlow = null
     this.currentRoom = null
@@ -1670,79 +1849,6 @@ function resolvePlayerId(playerId: string | undefined): string {
   return normalized
 }
 
-function readFirstRoomResults(
-  roomGateway: RoomGateway,
-  roomCode: string,
-): Promise<readonly RoomResultSubmission[]> {
-  return new Promise((resolve, reject) => {
-    let settled = false
-    let unsubscribe: (() => void) | null = null
-    let unsubscribeRequested = false
-    let didUnsubscribe = false
-
-    const unsubscribeOnce = () => {
-      if (didUnsubscribe) {
-        return
-      }
-      if (!unsubscribe) {
-        unsubscribeRequested = true
-        return
-      }
-
-      didUnsubscribe = true
-      const stop = unsubscribe
-      unsubscribe = null
-      try {
-        stop()
-      } catch {
-        // A completed one-shot read must not be reopened by cleanup errors.
-      }
-    }
-
-    const resolveOnce = (
-      results: readonly RoomResultSubmission[],
-    ) => {
-      if (settled) {
-        return
-      }
-      settled = true
-      unsubscribeOnce()
-      resolve([...results])
-    }
-
-    const rejectOnce = (error: unknown) => {
-      if (settled) {
-        return
-      }
-      settled = true
-      unsubscribeOnce()
-      reject(error)
-    }
-
-    let subscribePromise: Promise<() => void>
-    try {
-      subscribePromise = roomGateway.subscribeResults(
-        roomCode,
-        resolveOnce,
-        rejectOnce,
-      )
-    } catch (error) {
-      rejectOnce(error)
-      return
-    }
-
-    void subscribePromise.then(
-      (stop) => {
-        unsubscribe = stop
-        if (unsubscribeRequested) {
-          unsubscribeOnce()
-        }
-      },
-      rejectOnce,
-    )
-  })
-}
-
 function createDeckSeed(prefix: string): string {
   return `${prefix}-${Date.now()}-${createRandomUuid()}`
 }
@@ -1752,6 +1858,19 @@ function toUserMessage(error: unknown): string {
     return error.message
   }
   return '요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.'
+}
+
+function formatResultDeadlineRemaining(resultDeadlineAt: number): string {
+  const rawRemainingSeconds = Math.ceil(
+    (resultDeadlineAt - Date.now()) / 1_000,
+  )
+  if (rawRemainingSeconds <= 0) {
+    return '서버 마감 확인 중'
+  }
+  const remainingSeconds = rawRemainingSeconds
+  const minutes = Math.floor(remainingSeconds / 60)
+  const seconds = String(remainingSeconds % 60).padStart(2, '0')
+  return `${minutes}:${seconds}`
 }
 
 function formatScore(score: number): string {

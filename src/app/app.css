@@ -918,3 +918,26 @@
     grid-template-columns: 1fr;
   }
 }
+
+.result-deadline-copy {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.75rem auto 0;
+  max-width: 30rem;
+  color: #c8d2df;
+}
+
+.result-deadline-copy strong {
+  color: #ffd76a;
+  font-size: 1.35rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.result-waiting-roster .is-finalizing {
+  color: #ffd76a;
+}
+
+.result-standing.is-dnf {
+  border-style: dashed;
+  opacity: 0.76;
+}
