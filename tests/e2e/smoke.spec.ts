@@ -125,6 +125,30 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/')
 })
 
+test('crypto.randomUUID가 없는 모바일 HTTP 환경에서도 혼자 하기를 시작한다', async ({
+  page,
+}) => {
+  await page.evaluate(() => sessionStorage.clear())
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis.crypto, 'randomUUID', {
+      configurable: true,
+      value: undefined,
+    })
+  })
+
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  await page.reload()
+
+  await expect
+    .poll(() => page.evaluate(() => typeof crypto.randomUUID))
+    .toBe('undefined')
+  await startSoloGame(page)
+  await waitForActiveToken(page)
+
+  expect(pageErrors).toEqual([])
+})
+
 test('홈에서 핵심 시작 방법을 표시한다', async ({ page }) => {
   await expect(page).toHaveTitle('오늘 뭐 썰?')
   await expect(page.getByRole('heading', { name: '오늘 뭐 썰?' })).toBeVisible()
