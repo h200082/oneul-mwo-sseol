@@ -205,14 +205,18 @@ export class AppController {
   }
 
   private renderHome(invitedRoomCode: string | null = null): void {
-    this.viewGeneration += 1
+    const isInviteMode = invitedRoomCode !== null
+    const homeGeneration = ++this.viewGeneration
     this.cleanupRoomFlow()
     this.gameHost.stop()
     this.homeActionPending = false
     this.activeHomeAction = null
     this.screenRoot.hidden = false
     this.screenRoot.innerHTML = `
-      <div class="app-screen home-screen">
+      <div
+        class="app-screen home-screen${isInviteMode ? ' home-screen-invite' : ''}"
+        ${isInviteMode ? 'data-testid="invite-home"' : ''}
+      >
         <header class="brand-block">
           <p class="eyebrow">POP ARCADE MENU BATTLE</p>
           <h1>오늘 뭐 썰?</h1>
@@ -223,7 +227,11 @@ export class AppController {
         </header>
 
         <section class="setup-card" aria-labelledby="play-setup-title">
-          <h2 id="play-setup-title">바로 시작하기</h2>
+          <h2 id="play-setup-title">
+            ${
+              isInviteMode ? `방 ${invitedRoomCode}에 초대됐어요` : '바로 시작하기'
+            }
+          </h2>
 
           <label class="field-label" for="nickname-input">닉네임</label>
           <input
@@ -266,8 +274,12 @@ export class AppController {
 
         <section class="join-card" aria-labelledby="join-title">
           <div>
-            <p class="section-kicker">친구 방 참가</p>
-            <h2 id="join-title">8자리 코드를 입력하세요</h2>
+            <p class="section-kicker">
+              ${isInviteMode ? 'ROOM INVITATION' : '친구 방 참가'}
+            </p>
+            <h2 id="join-title">
+              ${isInviteMode ? '초대받은 방을 확인해 주세요' : '8자리 코드를 입력하세요'}
+            </h2>
           </div>
           <div class="join-row">
             <input
@@ -278,13 +290,14 @@ export class AppController {
               autocomplete="off"
               placeholder="ABCD2EFG"
               aria-label="방 코드"
+              ${isInviteMode ? 'readonly' : ''}
             />
             <button
               class="button button-secondary"
               type="button"
               data-testid="join-room"
             >
-              참가
+              ${isInviteMode ? '이 방에 참가' : '참가'}
             </button>
           </div>
           <button
@@ -294,6 +307,17 @@ export class AppController {
           >
             앱에서 QR 스캔
           </button>
+          ${
+            isInviteMode
+              ? `
+                <button
+                  class="button button-ghost invite-cancel-button"
+                  type="button"
+                  data-testid="cancel-invite"
+                >다른 방 찾기</button>
+              `
+              : ''
+          }
         </section>
 
         <p class="prototype-note" data-testid="backend-note">
@@ -310,8 +334,7 @@ export class AppController {
     `
 
     const elements = this.getHomeElements()
-    elements.nickname.value =
-      sessionStorage.getItem(NICKNAME_STORAGE_KEY) ?? ''
+    elements.nickname.value = this.readStoredNickname()
     elements.roomCode.value = invitedRoomCode ?? ''
 
     this.query<HTMLButtonElement>('[data-testid="solo-start"]').addEventListener(
@@ -351,8 +374,41 @@ export class AppController {
     )
 
     if (invitedRoomCode) {
+      elements.nickname.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') {
+          return
+        }
+        event.preventDefault()
+        void this.joinRoom(elements)
+      })
+
+      this.query<HTMLButtonElement>(
+        '[data-testid="cancel-invite"]',
+      ).addEventListener('click', () => {
+        const url = new URL(window.location.href)
+        url.searchParams.delete('room')
+        window.history.replaceState({}, '', url)
+        this.renderHome()
+      })
+
+      const savedNickname = elements.nickname.value
+      if (savedNickname) {
+        elements.status.textContent =
+          `${savedNickname}님으로 초대받은 방에 입장하고 있어요…`
+        queueMicrotask(() => {
+          if (
+            this.viewGeneration !== homeGeneration ||
+            this.homeActionPending
+          ) {
+            return
+          }
+          void this.joinRoom(elements)
+        })
+        return
+      }
+
       elements.status.textContent =
-        '초대 링크를 확인했습니다. 닉네임을 입력하고 참가하세요.'
+        '닉네임을 한 번 입력하면 다음 QR부터 바로 입장합니다.'
       elements.nickname.focus()
     }
   }
@@ -1800,8 +1856,60 @@ export class AppController {
 
   private readNickname(input: HTMLInputElement): string {
     const nickname = normalizeNickname(input.value)
-    sessionStorage.setItem(NICKNAME_STORAGE_KEY, nickname)
+    this.persistNickname(nickname)
     return nickname
+  }
+
+  private readStoredNickname(): string {
+    const storageNames: readonly ('localStorage' | 'sessionStorage')[] =
+      this.backend === 'firebase'
+        ? ['localStorage', 'sessionStorage']
+        : ['sessionStorage']
+
+    for (const storageName of storageNames) {
+      const storedNickname = this.readNicknameStorage(storageName)
+      if (!storedNickname) {
+        continue
+      }
+
+      try {
+        const nickname = normalizeNickname(storedNickname)
+        this.persistNickname(nickname)
+        return nickname
+      } catch {
+        // Ignore stale or invalid saved values and let the user enter a name.
+      }
+    }
+
+    return ''
+  }
+
+  private persistNickname(nickname: string): void {
+    this.writeNicknameStorage('sessionStorage', nickname)
+    if (this.backend === 'firebase') {
+      this.writeNicknameStorage('localStorage', nickname)
+    }
+  }
+
+  private readNicknameStorage(
+    storageName: 'localStorage' | 'sessionStorage',
+  ): string | null {
+    try {
+      return window[storageName].getItem(NICKNAME_STORAGE_KEY)
+    } catch {
+      return null
+    }
+  }
+
+  private writeNicknameStorage(
+    storageName: 'localStorage' | 'sessionStorage',
+    nickname: string,
+  ): void {
+    try {
+      window[storageName].setItem(NICKNAME_STORAGE_KEY, nickname)
+    } catch {
+      // Storage can be unavailable in privacy modes; joining must still work.
+    }
   }
 
   private readMealTime(): MealTime {
