@@ -2,7 +2,8 @@ import {
   collection,
   doc,
   getDoc,
-  getDocs,
+  getDocFromServer,
+  getDocsFromServer,
   onSnapshot,
   runTransaction,
   serverTimestamp,
@@ -29,6 +30,7 @@ import {
   type RoomResultSubmission,
 } from '../domain/roomResults'
 import {
+  type AuthoritativeRoomResultState,
   type RoomGateway,
   type RoomErrorListener,
   type RoomListener,
@@ -300,6 +302,33 @@ export class FirebaseRoomGateway implements RoomGateway {
     return this.readResults(code)
   }
 
+  async readAuthoritativeResultState(
+    roomCode: string,
+  ): Promise<Readonly<AuthoritativeRoomResultState>> {
+    const code = normalizeRoomCode(roomCode)
+    const finalizationRef = doc(
+      this.db,
+      'rooms',
+      code,
+      'resultFinalization',
+      'ready',
+    )
+    let finalization: AuthoritativeRoomResultState['finalization'] =
+      'closed'
+
+    try {
+      await getDocFromServer(finalizationRef)
+    } catch (error) {
+      if (!isFirestorePermissionDenied(error)) {
+        throw error
+      }
+      finalization = 'open'
+    }
+
+    const results = await this.readResults(code)
+    return Object.freeze({ finalization, results })
+  }
+
   async subscribeResults(
     roomCode: string,
     listener: RoomResultsListener,
@@ -348,7 +377,7 @@ export class FirebaseRoomGateway implements RoomGateway {
   private async readResults(
     roomCode: string,
   ): Promise<readonly RoomResultSubmission[]> {
-    const snapshot = await getDocs(
+    const snapshot = await getDocsFromServer(
       collection(this.db, 'rooms', roomCode, 'results'),
     )
     return decodeResultSnapshot(snapshot)
@@ -401,6 +430,13 @@ function encodeRoomForFirestore(room: Room): Record<string, unknown> {
         : {
             ...encoded.start,
             startAt: Timestamp.fromMillis(encoded.start.startAt),
+            ...(encoded.start.resultDeadlineAt === undefined
+              ? {}
+              : {
+                  resultDeadlineAt: Timestamp.fromMillis(
+                    encoded.start.resultDeadlineAt,
+                  ),
+                }),
             rosterIds: [...encoded.start.rosterIds],
           },
   }
@@ -412,10 +448,17 @@ function decodeRoomSnapshot(data: DocumentData, roomCode: string): Room {
       {
         ...data,
         start:
-          isRecord(data.start) && data.start.startAt instanceof Timestamp
+          isRecord(data.start) &&
+          data.start.startAt instanceof Timestamp
             ? {
                 ...data.start,
                 startAt: data.start.startAt.toMillis(),
+                ...(data.start.resultDeadlineAt instanceof Timestamp
+                  ? {
+                      resultDeadlineAt:
+                        data.start.resultDeadlineAt.toMillis(),
+                    }
+                  : {}),
               }
             : data.start,
       },
@@ -510,6 +553,10 @@ function sameResult(
       (menuId, index) => menuId === right.capturedMenuIds[index],
     )
   )
+}
+
+function isFirestorePermissionDenied(error: unknown): boolean {
+  return isRecord(error) && error.code === 'permission-denied'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

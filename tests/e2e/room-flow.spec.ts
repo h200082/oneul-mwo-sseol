@@ -1,5 +1,10 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import {
+  ROOM_RESULT_SYNC_GRACE_MS,
+  ROOM_RESULT_WINDOW_MS,
+} from '../../src/domain/room'
+
 interface RoomGameDebugState {
   readonly mealTime: 'lunch' | 'dinner'
   readonly deckSeed: string | number
@@ -234,6 +239,89 @@ test('두 탭의 결과를 기다렸다가 같은 순위와 겹침 메뉴를 공
 
   await page.getByTestId('result-home').click()
   await expect(page.getByTestId('solo-start')).toBeVisible()
+})
+
+test('결과 마감 뒤 미제출 참가자를 미완주로 확정하고 타이머를 정리한다', async ({
+  page,
+  context,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === 'mobile-chromium',
+    '두 페이지 deadline 동기화는 데스크톱 Chromium에서 한 번 검증합니다.',
+  )
+
+  const fixedTime = new Date('2026-08-04T12:00:00.000Z')
+  await page.clock.install({ time: fixedTime })
+  await page.goto('/')
+  await page.getByLabel('닉네임').fill('완주 방장')
+  await page.getByTestId('create-room').click()
+
+  const roomCode = (await page.getByTestId('room-code').textContent())?.trim()
+  expect(roomCode).toBeTruthy()
+  if (!roomCode) {
+    return
+  }
+
+  const participantPage = await context.newPage()
+  await participantPage.clock.install({ time: fixedTime })
+  await participantPage.goto(`/?room=${roomCode}`)
+  await participantPage.getByLabel('닉네임').fill('중도 이탈자')
+  await participantPage.getByTestId('join-room').click()
+  await expect(page.getByTestId('player-count')).toHaveText('2/8')
+
+  await page.getByTestId('start-room').click()
+  await Promise.all([
+    page.clock.fastForward(3_100),
+    participantPage.clock.fastForward(3_100),
+  ])
+  await expect(page.locator('#game-root canvas')).toBeVisible({
+    timeout: GAME_CANVAS_TIMEOUT_MS,
+  })
+  await expect(participantPage.locator('#game-root canvas')).toBeVisible({
+    timeout: GAME_CANVAS_TIMEOUT_MS,
+  })
+  await submitRoomResultForTest(page, {
+    score: 0,
+    capturedMenuIds: [],
+  })
+  await expect(page.getByTestId('room-results-waiting')).toBeVisible()
+  await expect(page.getByTestId('result-progress')).toHaveText('1/2')
+  await expect(page.getByTestId('result-deadline-countdown')).toBeVisible()
+
+  await Promise.all([
+    page.clock.fastForward(
+      ROOM_RESULT_WINDOW_MS + ROOM_RESULT_SYNC_GRACE_MS + 2_500,
+    ),
+    participantPage.clock.fastForward(
+      ROOM_RESULT_WINDOW_MS + ROOM_RESULT_SYNC_GRACE_MS + 2_500,
+    ),
+  ])
+  await expect(page.getByTestId('room-results-summary')).toBeVisible()
+  await expect(
+    participantPage.getByTestId('room-results-summary'),
+  ).toBeVisible()
+
+  const standings = page.getByTestId('result-standing')
+  await expect(standings).toHaveCount(2)
+  await expect(standings.nth(0)).toContainText('완주 방장')
+  await expect(standings.nth(0)).toContainText('0점')
+  await expect(standings.nth(1)).toContainText('중도 이탈자')
+  await expect(standings.nth(1)).toContainText('미완주 · 0점')
+  await expect(standings.nth(1).getByTestId('capture-slot')).toHaveCount(2)
+  await expect(standings.nth(1)).toContainText('빈칸')
+  await expect(page.getByTestId('result-outcome')).toContainText(
+    '중도 이탈자님이 완주 방장님의 식사를 부담해요.',
+  )
+  await expect(
+    participantPage.getByTestId('result-standing').allTextContents(),
+  ).resolves.toEqual(await standings.allTextContents())
+
+  await page.getByTestId('result-home').click()
+  await expect(page.getByTestId('solo-start')).toBeVisible()
+  await page.clock.fastForward(10_000)
+  await expect(page.getByTestId('solo-start')).toBeVisible()
+  await expect(page.getByTestId('room-results-summary')).toHaveCount(0)
+  await participantPage.close()
 })
 
 test('대기실에서 방장이 나가면 첫 참가자가 방장을 승계한다', async ({

@@ -1,6 +1,8 @@
 import {
   ROOM_CODE_ALPHABET,
   ROOM_CODE_LENGTH,
+  ROOM_RESULT_SYNC_GRACE_MS,
+  ROOM_RESULT_WINDOW_MS,
   createRoom as createDomainRoom,
   joinRoom as joinDomainRoom,
   leaveRoom as leaveDomainRoom,
@@ -22,6 +24,7 @@ import {
   RoomInviteError,
 } from './roomInvite'
 import type {
+  AuthoritativeRoomResultState,
   RoomGateway,
   RoomErrorListener,
   RoomListener,
@@ -43,6 +46,7 @@ export type LocalRoomGatewayErrorCode =
   | 'ROOM_NOT_STARTED'
   | 'PLAYER_NOT_IN_ROSTER'
   | 'RESULT_ALREADY_SUBMITTED'
+  | 'RESULT_DEADLINE_PASSED'
   | 'STORAGE_UNAVAILABLE'
 
 interface ResultSubscription {
@@ -70,6 +74,7 @@ export interface LocalRoomGatewayOptions {
   readonly rng?: RoomRandomSource
   readonly storagePrefix?: string
   readonly maxCodeAttempts?: number
+  readonly now?: () => number
 }
 
 /**
@@ -87,6 +92,7 @@ export class LocalRoomGateway implements RoomGateway {
   private readonly rng: RoomRandomSource
   private readonly storagePrefix: string
   private readonly maxCodeAttempts: number
+  private readonly now: () => number
   private readonly listeners = new Map<string, Set<RoomListener>>()
   private readonly resultListeners = new Map<
     string,
@@ -104,6 +110,7 @@ export class LocalRoomGateway implements RoomGateway {
     this.rng = options.rng ?? Math.random
     this.maxCodeAttempts =
       options.maxCodeAttempts ?? DEFAULT_CODE_ATTEMPTS
+    this.now = options.now ?? Date.now
 
     if (
       !Number.isInteger(this.maxCodeAttempts) ||
@@ -255,11 +262,39 @@ export class LocalRoomGateway implements RoomGateway {
       )
     }
 
+    if (this.now() > room.start.resultDeadlineAt) {
+      throw new LocalRoomGatewayError(
+        'RESULT_DEADLINE_PASSED',
+        '결과 제출 마감시간이 지나 미완주로 처리됩니다.',
+      )
+    }
+
     this.writePlayerResult(room.code, result)
     const updated = this.readResults(room.code)
     this.notifyResultListeners(room.code, updated)
     this.notifications.publish(room.code)
     return updated
+  }
+
+  async readAuthoritativeResultState(
+    roomCode: string,
+  ): Promise<Readonly<AuthoritativeRoomResultState>> {
+    const room = this.requireRoom(roomCode)
+    if (room.status !== 'started') {
+      throw new LocalRoomGatewayError(
+        'ROOM_NOT_STARTED',
+        '시작된 방에서만 결과 마감 상태를 확인할 수 있습니다.',
+      )
+    }
+
+    return Object.freeze({
+      finalization:
+        this.now() >=
+        room.start.resultDeadlineAt + ROOM_RESULT_SYNC_GRACE_MS
+          ? 'closed'
+          : 'open',
+      results: this.readResults(room.code),
+    })
   }
 
   async subscribeResults(
@@ -780,12 +815,16 @@ function deserializeRoom(raw: string, expectedCode: string): Room {
   const start = readStoredStart(stored.start)
   validateStoredStartRoster(start.roster, room.players)
 
-  return startDomainRoom(room, {
+  const startedRoom = startDomainRoom(room, {
     requesterPlayerId: stored.hostPlayerId,
     deckSeed: start.deckSeed,
     contentVersion: start.contentVersion,
     startAt: start.startAt,
   })
+  if (startedRoom.start.resultDeadlineAt !== start.resultDeadlineAt) {
+    throw new Error('Stored result deadline is inconsistent.')
+  }
+  return startedRoom
 }
 
 function readStoredRoom(value: unknown): StoredRoomShape {
@@ -866,6 +905,7 @@ interface StoredStartShape {
   readonly deckSeed: string | number
   readonly contentVersion: string
   readonly startAt: number
+  readonly resultDeadlineAt: number
   readonly roster: readonly StoredPlayerShape[]
 }
 
@@ -874,12 +914,20 @@ function readStoredStart(value: unknown): StoredStartShape {
     throw new Error('A started room must contain start data.')
   }
 
-  const { deckSeed, contentVersion, startAt, roster } = value
+  const {
+    deckSeed,
+    contentVersion,
+    startAt,
+    resultDeadlineAt,
+    roster,
+  } = value
   if (
     (typeof deckSeed !== 'string' &&
       typeof deckSeed !== 'number') ||
     typeof contentVersion !== 'string' ||
     typeof startAt !== 'number' ||
+    (resultDeadlineAt !== undefined &&
+      typeof resultDeadlineAt !== 'number') ||
     !Array.isArray(roster)
   ) {
     throw new Error('Stored room start data has an invalid shape.')
@@ -889,6 +937,8 @@ function readStoredStart(value: unknown): StoredStartShape {
     deckSeed,
     contentVersion,
     startAt,
+    resultDeadlineAt:
+      resultDeadlineAt ?? startAt + ROOM_RESULT_WINDOW_MS,
     roster: roster.map(readStoredPlayer),
   }
 }

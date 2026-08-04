@@ -25,6 +25,10 @@ import {
   type Firestore,
 } from 'firebase/firestore'
 import { readFile } from 'node:fs/promises'
+import {
+  ROOM_RESULT_SYNC_GRACE_MS,
+  ROOM_RESULT_WINDOW_MS,
+} from '../src/domain/room'
 import { FirebaseRoomGateway } from '../src/firebase/FirebaseRoomGateway'
 
 const PROJECT_ID = 'demo-oneul-mwo-sseol'
@@ -162,12 +166,17 @@ describeWithEmulator('Cloud Firestore security rules', () => {
       .authenticatedContext('member-uid')
       .firestore()
 
+    const startAt = Timestamp.now()
+    const resultDeadlineAt = Timestamp.fromMillis(
+      startAt.toMillis() + ROOM_RESULT_WINDOW_MS,
+    )
     const startUpdate = {
       status: 'started',
       start: {
         deckSeed: 'shared-seed',
         contentVersion: 'menus-v1',
-        startAt: serverTimestamp(),
+        startAt,
+        resultDeadlineAt,
         rosterIds: ['host-uid', 'member-uid'],
       },
       updatedAt: serverTimestamp(),
@@ -272,6 +281,99 @@ describeWithEmulator('Cloud Firestore security rules', () => {
     )
   })
 
+  it('accepts a legacy v1 start during the migration window', async () => {
+    await seedRoom(
+      waitingRoom(['host-uid', 'member-uid'], false, ROOM_CODE, 1),
+    )
+    const hostDb = testEnvironment
+      .authenticatedContext('host-uid')
+      .firestore()
+    const startAt = Timestamp.now()
+
+    await assertSucceeds(
+      updateDoc(doc(hostDb, 'rooms', ROOM_CODE), {
+        status: 'started',
+        start: {
+          deckSeed: 'legacy-seed',
+          contentVersion: 'menus-v1',
+          startAt,
+          rosterIds: ['host-uid', 'member-uid'],
+        },
+        updatedAt: serverTimestamp(),
+      }),
+    )
+  })
+
+  it('opens the server finalization probe only after grace', async () => {
+    const closedStartAt = Timestamp.fromMillis(
+      Date.now() -
+        ROOM_RESULT_WINDOW_MS -
+        ROOM_RESULT_SYNC_GRACE_MS -
+        1_000,
+    )
+    await seedRoom(
+      startedRoom(['host-uid', 'member-uid'], closedStartAt, 1),
+    )
+    const hostDb = testEnvironment
+      .authenticatedContext('host-uid')
+      .firestore()
+
+    const closedProbe = await assertSucceeds(
+      getDoc(
+        doc(
+          hostDb,
+          'rooms',
+          ROOM_CODE,
+          'resultFinalization',
+          'ready',
+        ),
+      ),
+    )
+    expect(closedProbe.exists()).toBe(false)
+
+    const openCode = 'DEFGHJKM'
+    await seedRoom(
+      {
+        ...startedRoom(['host-uid', 'member-uid']),
+        code: openCode,
+      },
+      openCode,
+    )
+    await assertFails(
+      getDoc(
+        doc(
+          hostDb,
+          'rooms',
+          openCode,
+          'resultFinalization',
+          'ready',
+        ),
+      ),
+    )
+  })
+
+  it('rejects a new result after the server deadline', async () => {
+    const expiredStartAt = Timestamp.fromMillis(
+      Date.now() - ROOM_RESULT_WINDOW_MS - 1_000,
+    )
+    await seedRoom(startedRoom(['host-uid', 'member-uid'], expiredStartAt))
+    const hostDb = testEnvironment
+      .authenticatedContext('host-uid')
+      .firestore()
+
+    await assertFails(
+      setDoc(
+        doc(hostDb, 'rooms', ROOM_CODE, 'results', 'host-uid'),
+        {
+          playerId: 'host-uid',
+          score: 100,
+          capturedMenuIds: ['pizza'],
+          completedAt: serverTimestamp(),
+        },
+      ),
+    )
+  })
+
   it('rejects room values that the domain decoder cannot accept', async () => {
     const hostDb = testEnvironment
       .authenticatedContext('host-uid')
@@ -295,18 +397,51 @@ describeWithEmulator('Cloud Firestore security rules', () => {
       waitingRoom(['host-uid', 'member-uid']),
       'DEFGHJKM',
     )
+    const invalidStartAt = Timestamp.now()
     await assertFails(
       updateDoc(doc(hostDb, 'rooms', 'DEFGHJKM'), {
         status: 'started',
         start: {
           deckSeed: Number.NaN,
           contentVersion: '\t',
-          startAt: serverTimestamp(),
+          startAt: invalidStartAt,
+          resultDeadlineAt: Timestamp.fromMillis(
+            invalidStartAt.toMillis() + ROOM_RESULT_WINDOW_MS,
+          ),
           rosterIds: ['host-uid', 'member-uid'],
         },
         updatedAt: serverTimestamp(),
       }),
     )
+  })
+
+  it('reads a closed authoritative result state from the server', async () => {
+    const closedStartAt = Timestamp.fromMillis(
+      Date.now() -
+        ROOM_RESULT_WINDOW_MS -
+        ROOM_RESULT_SYNC_GRACE_MS -
+        1_000,
+    )
+    await seedRoom(
+      startedRoom(['host-uid', 'member-uid'], closedStartAt, 1),
+    )
+    const gateway = new FirebaseRoomGateway(
+      testEnvironment
+        .authenticatedContext('host-uid')
+        .firestore() as unknown as Firestore,
+      'host-uid',
+    )
+
+    try {
+      await expect(
+        gateway.readAuthoritativeResultState(ROOM_CODE),
+      ).resolves.toEqual({
+        finalization: 'closed',
+        results: [],
+      })
+    } finally {
+      gateway.dispose()
+    }
   })
 
   it('runs the Firebase gateway room and result flow against the rules', async () => {
@@ -368,6 +503,12 @@ describeWithEmulator('Cloud Firestore security rules', () => {
         completedAt: Date.now(),
       })
       expect(hostResults).toHaveLength(1)
+      await expect(
+        hostGateway.readAuthoritativeResultState(created.code),
+      ).resolves.toMatchObject({
+        finalization: 'open',
+        results: [{ playerId: 'host-uid' }],
+      })
 
       const allResults = await memberGateway.submitResult(created.code, {
         playerId: 'member-uid',
@@ -410,13 +551,14 @@ function waitingRoom(
   memberIds: readonly string[],
   useServerTimestamps = false,
   code = ROOM_CODE,
+  schemaVersion: 1 | 2 = 2,
 ): Record<string, unknown> {
   const timestamp = useServerTimestamps
     ? serverTimestamp()
     : Timestamp.now()
 
   return {
-    schemaVersion: 1,
+    schemaVersion,
     code,
     mealTime: 'lunch',
     status: 'waiting',
@@ -436,14 +578,23 @@ function waitingRoom(
 
 function startedRoom(
   memberIds: readonly string[],
+  startAt = Timestamp.now(),
+  schemaVersion: 1 | 2 = 2,
 ): Record<string, unknown> {
   return {
-    ...waitingRoom(memberIds),
+    ...waitingRoom(memberIds, false, ROOM_CODE, schemaVersion),
     status: 'started',
     start: {
       deckSeed: 'shared-seed',
       contentVersion: 'menus-v1',
-      startAt: Timestamp.now(),
+      startAt,
+      ...(schemaVersion === 2
+        ? {
+            resultDeadlineAt: Timestamp.fromMillis(
+              startAt.toMillis() + ROOM_RESULT_WINDOW_MS,
+            ),
+          }
+        : {}),
       rosterIds: [...memberIds],
     },
   }

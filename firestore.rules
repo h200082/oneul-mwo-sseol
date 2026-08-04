@@ -49,7 +49,7 @@ service cloud.firestore {
           'createdAt',
           'updatedAt'
         ])
-        && data.schemaVersion == 1
+        && data.schemaVersion in [1, 2]
         && data.code == code
         && validCode(code)
         && data.mealTime in ['lunch', 'dinner']
@@ -78,6 +78,14 @@ service cloud.firestore {
         .hasOnly(fields);
     }
 
+    function validSchemaTransition(oldData, newData) {
+      return newData.schemaVersion == oldData.schemaVersion
+        || (
+          oldData.schemaVersion == 1
+          && newData.schemaVersion == 2
+        );
+    }
+
     function isRoomCreate(code) {
       let data = request.resource.data;
       let uid = request.auth.uid;
@@ -99,7 +107,8 @@ service cloud.firestore {
       let uid = request.auth.uid;
       let playerDiff = newData.players.diff(oldData.players);
 
-      return oldData.status == 'waiting'
+      return validSchemaTransition(oldData, newData)
+        && oldData.status == 'waiting'
         && newData.status == 'waiting'
         && oldData.memberIds.size() < 8
         && !(uid in oldData.memberIds)
@@ -112,7 +121,8 @@ service cloud.firestore {
         && onlyRoomFieldsChanged([
           'memberIds',
           'players',
-          'updatedAt'
+          'updatedAt',
+          'schemaVersion'
         ]);
     }
 
@@ -122,7 +132,8 @@ service cloud.firestore {
       let uid = request.auth.uid;
       let playerDiff = newData.players.diff(oldData.players);
 
-      return oldData.status == 'waiting'
+      return validSchemaTransition(oldData, newData)
+        && oldData.status == 'waiting'
         && newData.status == 'waiting'
         && uid in oldData.memberIds
         && newData.memberIds == oldData.memberIds
@@ -132,7 +143,11 @@ service cloud.firestore {
         && playerDiff.removedKeys().size() == 0
         && validPlayer(newData.players, uid)
         && newData.updatedAt == request.time
-        && onlyRoomFieldsChanged(['players', 'updatedAt']);
+        && onlyRoomFieldsChanged([
+          'players',
+          'updatedAt',
+          'schemaVersion'
+        ]);
     }
 
     function isSelfLeave() {
@@ -141,7 +156,8 @@ service cloud.firestore {
       let uid = request.auth.uid;
       let playerDiff = newData.players.diff(oldData.players);
 
-      return oldData.status == 'waiting'
+      return validSchemaTransition(oldData, newData)
+        && oldData.status == 'waiting'
         && newData.status == 'waiting'
         && oldData.memberIds.size() > 1
         && uid in oldData.memberIds
@@ -160,11 +176,12 @@ service cloud.firestore {
           'hostPlayerId',
           'memberIds',
           'players',
-          'updatedAt'
+          'updatedAt',
+          'schemaVersion'
         ]);
     }
 
-    function validStart(start, memberIds) {
+    function validLegacyStart(start, memberIds) {
       return start is map
         && start.keys().hasAll([
           'deckSeed',
@@ -178,7 +195,32 @@ service cloud.firestore {
           'startAt',
           'rosterIds'
         ])
-        && start.deckSeed is string
+        && validSharedStart(start, memberIds);
+    }
+
+    function validCurrentStart(start, memberIds) {
+      return start is map
+        && start.keys().hasAll([
+          'deckSeed',
+          'contentVersion',
+          'startAt',
+          'resultDeadlineAt',
+          'rosterIds'
+        ])
+        && start.keys().hasOnly([
+          'deckSeed',
+          'contentVersion',
+          'startAt',
+          'resultDeadlineAt',
+          'rosterIds'
+        ])
+        && validSharedStart(start, memberIds)
+        && start.resultDeadlineAt is timestamp
+        && start.resultDeadlineAt == start.startAt + duration.value(180, 's');
+    }
+
+    function validSharedStart(start, memberIds) {
+      return start.deckSeed is string
         && start.deckSeed.size() >= 1
         && start.deckSeed.size() <= 128
         && start.deckSeed.matches('.*\\S.*')
@@ -192,11 +234,22 @@ service cloud.firestore {
         && start.rosterIds == memberIds;
     }
 
+    function validStart(start, memberIds, schemaVersion) {
+      return (
+          schemaVersion == 1
+          && validLegacyStart(start, memberIds)
+        ) || (
+          schemaVersion == 2
+          && validCurrentStart(start, memberIds)
+        );
+    }
+
     function isHostStart() {
       let oldData = resource.data;
       let newData = request.resource.data;
 
-      return oldData.status == 'waiting'
+      return validSchemaTransition(oldData, newData)
+        && oldData.status == 'waiting'
         && newData.status == 'started'
         && request.auth.uid == oldData.hostPlayerId
         && oldData.memberIds.size() >= 2
@@ -204,9 +257,18 @@ service cloud.firestore {
         && newData.memberIds == oldData.memberIds
         && newData.players == oldData.players
         && newData.hostPlayerId == oldData.hostPlayerId
-        && validStart(newData.start, oldData.memberIds)
+        && validStart(
+          newData.start,
+          oldData.memberIds,
+          newData.schemaVersion
+        )
         && newData.updatedAt == request.time
-        && onlyRoomFieldsChanged(['status', 'start', 'updatedAt']);
+        && onlyRoomFieldsChanged([
+          'status',
+          'start',
+          'updatedAt',
+          'schemaVersion'
+        ]);
     }
 
     function validCapturedMenuIds(ids) {
@@ -244,6 +306,29 @@ service cloud.firestore {
       return signedIn() && request.auth.uid in room.memberIds;
     }
 
+    function resultWindowOpen(room) {
+      return (
+          room.schemaVersion == 1
+          && request.time <=
+            room.start.startAt + duration.value(180, 's')
+        ) || (
+          room.schemaVersion == 2
+          && request.time <= room.start.resultDeadlineAt
+        );
+    }
+
+    function resultFinalizationReady(room) {
+      return (
+          room.schemaVersion == 1
+          && request.time >=
+            room.start.startAt + duration.value(185, 's')
+        ) || (
+          room.schemaVersion == 2
+          && request.time >=
+            room.start.resultDeadlineAt + duration.value(5, 's')
+        );
+    }
+
     function mayCreateResult(roomCode, resultUid) {
       let room = parentRoom(roomCode);
       let data = request.resource.data;
@@ -269,7 +354,18 @@ service cloud.firestore {
         && data.score >= 0
         && data.score <= 100
         && validCapturedMenuIds(data.capturedMenuIds)
-        && data.completedAt == request.time;
+        && data.completedAt == request.time
+        && resultWindowOpen(room);
+    }
+
+    function mayProbeResultFinalization(roomCode, probeId) {
+      let room = parentRoom(roomCode);
+
+      return signedIn()
+        && probeId == 'ready'
+        && room.status == 'started'
+        && request.auth.uid in room.memberIds
+        && resultFinalizationReady(room);
     }
 
     match /rooms/{roomCode} {
@@ -296,6 +392,11 @@ service cloud.firestore {
         allow get, list: if mayReadResults(roomCode);
         allow create: if mayCreateResult(roomCode, resultUid);
         allow update, delete: if false;
+      }
+
+      match /resultFinalization/{probeId} {
+        allow get: if mayProbeResultFinalization(roomCode, probeId);
+        allow list, create, update, delete: if false;
       }
     }
 

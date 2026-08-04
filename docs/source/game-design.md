@@ -689,7 +689,7 @@ interface RoundEntry {
 
 - 플레이 중 일시적인 네트워크 끊김이 발생해도 로컬 게임은 계속 진행
 - 연결 복구 후 결과 재전송
-- 결과 제한 시간까지 제출하지 못하면 `미완주` 표시
+- 공통 시작 시각에서 180초까지 제출하지 못하면 0점·빈 포획의 `미완주` 표시
 - 탭을 전환해도 공통 시작 시각 기준으로 라운드는 진행하며 놓친 항목은 0점
 - 플레이 이후에는 방장이 이탈해도 각 클라이언트가 동일 규칙으로 결과를 집계
 
@@ -703,7 +703,7 @@ rooms/{roomId}
     mealTime
     contentVersion
     startAt
-    resultDeadline
+    resultDeadlineAt
     expiresAt
   roster
     slot0 ... slot7
