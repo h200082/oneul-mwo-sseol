@@ -29,6 +29,7 @@ import {
   type GameLaunchOptions,
   type PlayerGameResultHandler,
 } from '../gameTypes'
+import type { RoomGameProgressStore } from '../gameProgress'
 
 const TOTAL_ROUNDS = 20
 const JUDGEMENT_RADIUS = 64
@@ -115,6 +116,7 @@ export class PrototypeScene extends Phaser.Scene {
     private readonly launchOptions: GameLaunchOptions =
       DEFAULT_GAME_LAUNCH_OPTIONS,
     private readonly onGameResult?: PlayerGameResultHandler,
+    private readonly progressStore?: RoomGameProgressStore,
   ) {
     super('prototype')
   }
@@ -128,6 +130,16 @@ export class PrototypeScene extends Phaser.Scene {
         rng: createSeededRandom(this.launchOptions.deckSeed),
       },
     )
+
+    const progressIdentity = this.launchOptions.progressIdentity
+    if (progressIdentity && this.progressStore) {
+      this.rounds = [
+        ...this.progressStore.load(
+          progressIdentity,
+          this.deck.map((menu) => menu.id),
+        ),
+      ]
+    }
   }
 
   create(): void {
@@ -139,6 +151,7 @@ export class PrototypeScene extends Phaser.Scene {
     this.registerMenuTextures()
     this.drawArena()
     this.createHud()
+    this.restoreCapturedMenus()
 
     this.trail = this.add.graphics().setDepth(20)
 
@@ -970,6 +983,7 @@ export class PrototypeScene extends Phaser.Scene {
       menuId: token.menu.id,
       action,
     })
+    this.persistCompletedRounds()
 
     this.updateHud()
 
@@ -1001,6 +1015,33 @@ export class PrototypeScene extends Phaser.Scene {
           ? SLICE_EFFECT_DURATION_MS + 60
           : 260
     this.time.delayedCall(nextRoundDelay, () => this.spawnRound())
+  }
+
+  private persistCompletedRounds(): void {
+    const progressIdentity = this.launchOptions.progressIdentity
+    if (!progressIdentity || !this.progressStore) {
+      return
+    }
+
+    this.progressStore.save(
+      progressIdentity,
+      this.rounds,
+      this.deck.map((menu) => menu.id),
+    )
+  }
+
+  private restoreCapturedMenus(): void {
+    const capturedMenuIds = this.rounds
+      .filter((round) => round.action.type === 'capture')
+      .map((round) => round.menuId)
+
+    capturedMenuIds.forEach((menuId, captureIndex) => {
+      const slot = this.captureSlots[captureIndex]
+      const menu = this.deck.find((entry) => entry.id === menuId)
+      if (slot && menu) {
+        this.populateCaptureSlot(slot, menu)
+      }
+    })
   }
 
   private playCaptureResolution(token: ActiveToken): void {
