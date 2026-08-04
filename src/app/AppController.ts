@@ -8,6 +8,7 @@ import {
   type StartedRoom,
   type WaitingRoom,
 } from '../domain/room'
+import { createRandomUuid } from '../domain/randomUuid'
 import {
   aggregateRoomResults,
   type RoomResultSubmission,
@@ -1651,7 +1652,7 @@ function getOrCreatePlayerId(): string {
     return existing
   }
 
-  const playerId = crypto.randomUUID()
+  const playerId = createRandomUuid()
   sessionStorage.setItem(PLAYER_ID_STORAGE_KEY, playerId)
   return playerId
 }
@@ -1743,7 +1744,7 @@ function readFirstRoomResults(
 }
 
 function createDeckSeed(prefix: string): string {
-  return `${prefix}-${Date.now()}-${crypto.randomUUID()}`
+  return `${prefix}-${Date.now()}-${createRandomUuid()}`
 }
 
 function toUserMessage(error: unknown): string {

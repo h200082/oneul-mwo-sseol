@@ -29,5 +29,6 @@ AI를 사용한 중요한 작업마다 Markdown 파일 하나를 생성합니다
 | 2026-07-31 | Firebase 방·공동 결과 | `2026-07-31-firebase-shared-results.md` |
 | 2026-08-01 | 대표 음식 5종 비주얼 슬라이스 | `2026-08-01-food-visual-slice.md` |
 | 2026-08-03 | 형태 독립 제스처·피드백 | `2026-08-03-shape-independent-gestures.md` |
+| 2026-08-03 | 길게 누르기 포획·완화 베기 | `2026-08-03-hold-capture-lenient-slice.md` |
 
 새 로그를 추가할 때 이 표도 함께 갱신하고, 실제 반영 범위와 아직 완료하지 않은 검증을 구분해 적습니다.

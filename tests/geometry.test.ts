@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   calculateAbsoluteClosedPathArea,
   calculateCircleSliceResult,
+  calculateDistanceFromPointToSegment,
   calculateSliceAccuracyScore,
   calculateSmallerCircleAreaRatio,
   DEFAULT_PATH_CLOSURE_TOLERANCE,
@@ -10,6 +11,8 @@ import {
   doesClosedPathContainCircle,
   doesPathContainCircleCenter,
   doesSegmentCrossCircle,
+  extendLineToCircleChord,
+  extendSegmentToCircleChord,
   findFirstCircleCrossingChord,
   isPathClosed,
   isSimpleClosedPath,
@@ -240,6 +243,131 @@ describe("findFirstCircleCrossingChord", () => {
   });
 });
 
+
+describe("lenient slice geometry", () => {
+  it("measures the shortest distance to the finite gesture segment", () => {
+    expect(
+      calculateDistanceFromPointToSegment(
+        { x: 0, y: 0 },
+        { x: 10, y: 10 },
+        { x: 30, y: 10 },
+      ),
+    ).toBeCloseTo(Math.sqrt(200), 12);
+  });
+
+  it("extends an inside-only intent line to both circumference points", () => {
+    expect(
+      extendLineToCircleChord(
+        { x: -20, y: 0 },
+        { x: 20, y: 0 },
+        TOKEN,
+      ),
+    ).toEqual({
+      entryPoint: { x: -50, y: 0 },
+      exitPoint: { x: 50, y: 0 },
+    });
+  });
+
+  it("preserves the input direction when extending a line", () => {
+    expect(
+      extendLineToCircleChord(
+        { x: 20, y: 0 },
+        { x: -20, y: 0 },
+        TOKEN,
+      ),
+    ).toEqual({
+      entryPoint: { x: 50, y: 0 },
+      exitPoint: { x: -50, y: 0 },
+    });
+  });
+
+  it("extends an offset line to the mathematically correct chord", () => {
+    const chord = extendLineToCircleChord(
+      { x: -20, y: 25 },
+      { x: 20, y: 25 },
+      TOKEN,
+    );
+    const halfChord = Math.sqrt(50 ** 2 - 25 ** 2);
+
+    expect(chord?.entryPoint.x).toBeCloseTo(-halfChord, 12);
+    expect(chord?.entryPoint.y).toBeCloseTo(25, 12);
+    expect(chord?.exitPoint.x).toBeCloseTo(halfChord, 12);
+    expect(chord?.exitPoint.y).toBeCloseTo(25, 12);
+  });
+
+  it("rejects a tangent and a line inside the tangent safety inset", () => {
+    expect(
+      extendLineToCircleChord(
+        { x: -20, y: 50 },
+        { x: 20, y: 50 },
+        TOKEN,
+      ),
+    ).toBeNull();
+    expect(
+      extendLineToCircleChord(
+        { x: -20, y: 49 },
+        { x: 20, y: 49 },
+        TOKEN,
+        2,
+      ),
+    ).toBeNull();
+  });
+
+  it("limits lenient correction to the configured endpoint distance", () => {
+    expect(
+      extendSegmentToCircleChord(
+        { x: -20, y: 0 },
+        { x: 20, y: 0 },
+        TOKEN,
+        32,
+      ),
+    ).toEqual({
+      entryPoint: { x: -50, y: 0 },
+      exitPoint: { x: 50, y: 0 },
+    });
+
+    expect(
+      extendSegmentToCircleChord(
+        { x: 50, y: 0 },
+        { x: 86, y: 0 },
+        TOKEN,
+        32,
+      ),
+    ).toBeNull();
+  });
+
+  it("accepts a release near the opposite edge but not a one-sided stroke", () => {
+    expect(
+      extendSegmentToCircleChord(
+        { x: -100, y: 0 },
+        { x: 42, y: 0 },
+        TOKEN,
+        32,
+      ),
+    ).toEqual({
+      entryPoint: { x: -50, y: 0 },
+      exitPoint: { x: 50, y: 0 },
+    });
+    expect(
+      extendSegmentToCircleChord(
+        { x: 10, y: 0 },
+        { x: 42, y: 0 },
+        TOKEN,
+        32,
+      ),
+    ).toBeNull();
+  });
+
+  it("rejects a zero-length intent line", () => {
+    expect(() =>
+      extendLineToCircleChord(
+        { x: 0, y: 0 },
+        { x: 0, y: 0 },
+        TOKEN,
+      ),
+    ).toThrow(RangeError);
+  });
+});
 describe("closed-path area and simplicity", () => {
   const square: Point[] = [
     { x: -2, y: -2 },

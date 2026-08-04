@@ -16,11 +16,15 @@ interface PrototypeDebugState {
       readonly height: number
     }
   } | null
+  readonly captureEffectY: number | null
   readonly completedRounds: number
   readonly captureCount: number
   readonly filledCaptureSlotCount: number
   readonly pathPointCount: number
+  readonly localPathPointCount: number
   readonly lastSliceAngleDegrees: number | null
+  readonly lastSliceSource: 'strict' | 'extended' | null
+  readonly inputMode: 'idle' | 'hold' | 'slice'
   readonly activeSlicePieceCount: number
   readonly cleanedSlicePieceCount: number
   readonly lastAction: 'slice' | 'capture' | 'miss' | null
@@ -35,10 +39,7 @@ interface PrototypeDebugWindow extends Window {
   }
   __NHN_GAME__?: {
     scene: {
-      getScene: (key: string) => {
-        getDebugState: () => PrototypeDebugState
-        pauseActiveTokenForTest: () => void
-      }
+      getScene: (key: string) => { getDebugState: () => PrototypeDebugState }
     }
   }
 }
@@ -64,19 +65,6 @@ async function waitForActiveToken(page: Page): Promise<void> {
         .getScene('prototype')
         .getDebugState().activeToken,
     )
-  })
-}
-
-async function pauseActiveToken(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const debugWindow = window as PrototypeDebugWindow
-    const scene = debugWindow.__NHN_GAME__?.scene.getScene('prototype')
-
-    if (!scene) {
-      throw new Error('프로토타입 디버그 장면을 찾을 수 없습니다.')
-    }
-
-    scene.pauseActiveTokenForTest()
   })
 }
 
@@ -138,6 +126,30 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/')
 })
 
+test('crypto.randomUUID가 없는 모바일 HTTP 환경에서도 혼자 하기를 시작한다', async ({
+  page,
+}) => {
+  await page.evaluate(() => sessionStorage.clear())
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis.crypto, 'randomUUID', {
+      configurable: true,
+      value: undefined,
+    })
+  })
+
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  await page.reload()
+
+  await expect
+    .poll(() => page.evaluate(() => typeof crypto.randomUUID))
+    .toBe('undefined')
+  await startSoloGame(page)
+  await waitForActiveToken(page)
+
+  expect(pageErrors).toEqual([])
+})
+
 test('홈에서 핵심 시작 방법을 표시한다', async ({ page }) => {
   await expect(page).toHaveTitle('오늘 뭐 썰?')
   await expect(page.getByRole('heading', { name: '오늘 뭐 썰?' })).toBeVisible()
@@ -168,18 +180,14 @@ test('대표 음식 이미지를 Phaser 토큰으로 등록한다', async ({ pag
   })
 })
 
-test('토큰을 가로지르면 한 라운드를 베기로 완료한다', async (
-  { page },
-  testInfo,
-) => {
+test('드래그 중에도 음식은 계속 내려온다', async ({ page }, testInfo) => {
   test.skip(
     testInfo.project.name === 'mobile-chromium',
-    '모바일 프로젝트의 실제 터치 경로는 실기기 단계에서 검증합니다.',
+    '마우스 드래그의 연속 낙하는 데스크톱 Chromium에서 검증합니다.',
   )
 
   await startSoloGame(page)
   await waitForActiveToken(page)
-  await pauseActiveToken(page)
   const start = await readDebugState(page)
   const token = start.activeToken
 
@@ -189,20 +197,50 @@ test('토큰을 가로지르면 한 라운드를 베기로 완료한다', async 
   }
 
   const transform = await getCanvasTransform(page)
-  const sliceStart = toPagePoint(
-    transform,
-    token.x - token.judgement.radius - 28,
-    token.y,
+  const pointerStart = toPagePoint(transform, token.x, token.y)
+  const dragPoint = toPagePoint(transform, token.x + 24, token.y)
+
+  await page.mouse.move(pointerStart.x, pointerStart.y)
+  await page.mouse.down()
+  await page.mouse.move(dragPoint.x, dragPoint.y, { steps: 2 })
+  await expect
+    .poll(async () => (await readDebugState(page)).inputMode)
+    .toBe('slice')
+  await page.waitForTimeout(180)
+
+  const duringDrag = await readDebugState(page)
+  expect(duringDrag.activeToken?.y).toBeGreaterThan(token.y + 18)
+  expect(duringDrag.captureCount).toBe(0)
+  await page.mouse.up()
+})
+
+test('음식 안쪽에서 시작하고 끝내도 양끝을 보정해 베어낸다', async (
+  { page },
+  testInfo,
+) => {
+  test.skip(
+    testInfo.project.name === 'mobile-chromium',
+    '마우스 베기 경로는 데스크톱 Chromium에서 검증합니다.',
   )
-  const sliceEnd = toPagePoint(
-    transform,
-    token.x + token.judgement.radius + 28,
-    token.y,
-  )
+
+  await startSoloGame(page)
+  await waitForActiveToken(page)
+  const start = await readDebugState(page)
+  const token = start.activeToken
+
+  expect(token).not.toBeNull()
+  if (!token) {
+    return
+  }
+
+  const transform = await getCanvasTransform(page)
+  const insideOffset = token.judgement.radius * 0.55
+  const sliceStart = toPagePoint(transform, token.x - insideOffset, token.y)
+  const sliceEnd = toPagePoint(transform, token.x + insideOffset, token.y)
 
   await page.mouse.move(sliceStart.x, sliceStart.y)
   await page.mouse.down()
-  await page.mouse.move(sliceEnd.x, sliceEnd.y, { steps: 12 })
+  await page.mouse.move(sliceEnd.x, sliceEnd.y, { steps: 6 })
   await page.mouse.up()
 
   await expect
@@ -212,8 +250,14 @@ test('토큰을 가로지르면 한 라운드를 베기로 완료한다', async 
     .poll(async () => (await readDebugState(page)).lastAction)
     .toBe('slice')
   await expect
+    .poll(async () => (await readDebugState(page)).lastSliceSource)
+    .toBe('extended')
+  await expect
     .poll(async () => (await readDebugState(page)).lastSliceAngleDegrees)
-    .toBeCloseTo(0, 3)
+    .toBeCloseTo(0, 1)
+  await expect
+    .poll(async () => (await readDebugState(page)).captureCount)
+    .toBe(0)
   await expect
     .poll(async () => (await readDebugState(page)).cleanedSlicePieceCount)
     .toBe(2)
@@ -222,18 +266,17 @@ test('토큰을 가로지르면 한 라운드를 베기로 완료한다', async 
     .toBe(0)
 })
 
-test('토큰 주위에 원을 그리면 포획 슬롯을 사용한다', async (
+test('짧은 탭은 포획권이나 라운드를 소비하지 않는다', async (
   { page },
   testInfo,
 ) => {
   test.skip(
     testInfo.project.name === 'mobile-chromium',
-    '모바일 프로젝트의 실제 터치 경로는 실기기 단계에서 검증합니다.',
+    '마우스 짧은 탭 경로는 데스크톱 Chromium에서 검증합니다.',
   )
 
   await startSoloGame(page)
   await waitForActiveToken(page)
-  await pauseActiveToken(page)
   const start = await readDebugState(page)
   const token = start.activeToken
 
@@ -243,31 +286,197 @@ test('토큰 주위에 원을 그리면 포획 슬롯을 사용한다', async (
   }
 
   const transform = await getCanvasTransform(page)
-  const captureRadius = token.judgement.radius + 34
-  const captureStart = toPagePoint(
-    transform,
-    token.x + captureRadius,
-    token.y,
+  const tapPoint = toPagePoint(transform, token.x, token.y)
+
+  await page.mouse.move(tapPoint.x, tapPoint.y)
+  await page.mouse.down()
+  await page.waitForTimeout(120)
+  await page.mouse.up()
+  await page.waitForTimeout(80)
+
+  const afterTap = await readDebugState(page)
+  expect(afterTap.completedRounds).toBe(0)
+  expect(afterTap.captureCount).toBe(0)
+  expect(afterTap.inputMode).toBe('idle')
+  expect(afterTap.pathPointCount).toBe(0)
+  expect(afterTap.localPathPointCount).toBe(0)
+  expect(afterTap.feedback).toContain('0.3초')
+  expect(afterTap.activeToken?.y).toBeGreaterThan(token.y + 12)
+})
+
+test('길게 누르다 움직이면 시간이 지나도 포획되지 않는다', async (
+  { page },
+  testInfo,
+) => {
+  test.skip(
+    testInfo.project.name === 'mobile-chromium',
+    '마우스 hold→slice 전환은 데스크톱 Chromium에서 검증합니다.',
   )
 
-  await page.mouse.move(captureStart.x, captureStart.y)
-  await page.mouse.down()
+  await startSoloGame(page)
+  await waitForActiveToken(page)
+  const start = await readDebugState(page)
+  const token = start.activeToken
 
-  for (let step = 1; step <= 16; step += 1) {
-    const angle = (Math.PI * 2 * step) / 16
-    const point = toPagePoint(
-      transform,
-      token.x + Math.cos(angle) * captureRadius,
-      token.y + Math.sin(angle) * captureRadius,
-    )
-    await page.mouse.move(point.x, point.y)
+  expect(token).not.toBeNull()
+  if (!token) {
+    return
   }
 
+  const transform = await getCanvasTransform(page)
+  const holdPoint = toPagePoint(transform, token.x, token.y)
+  const dragPoint = toPagePoint(transform, token.x + 24, token.y)
+
+  await page.mouse.move(holdPoint.x, holdPoint.y)
+  await page.mouse.down()
+  await expect
+    .poll(async () => (await readDebugState(page)).inputMode)
+    .toBe('hold')
+  await page.waitForTimeout(60)
+  await page.mouse.move(dragPoint.x, dragPoint.y, { steps: 2 })
+  await expect
+    .poll(async () => (await readDebugState(page)).inputMode)
+    .toBe('slice')
+  await page.waitForTimeout(400)
+
+  const afterThreshold = await readDebugState(page)
+  expect(afterThreshold.inputMode).toBe('slice')
+  expect(afterThreshold.captureCount).toBe(0)
+  expect(afterThreshold.completedRounds).toBe(0)
+  expect(afterThreshold.activeToken?.y).toBeGreaterThan(token.y + 30)
   await page.mouse.up()
+})
+
+test('음식 위를 0.3초 길게 누르면 이동 중인 대상을 포획한다', async (
+  { page },
+  testInfo,
+) => {
+  test.skip(
+    testInfo.project.name === 'mobile-chromium',
+    '롱프레스의 마우스 입력 경로는 데스크톱 Chromium에서 검증합니다.',
+  )
+
+  await startSoloGame(page)
+  await waitForActiveToken(page)
+  const start = await readDebugState(page)
+  const token = start.activeToken
+
+  expect(token).not.toBeNull()
+  if (!token) {
+    return
+  }
+
+  const transform = await getCanvasTransform(page)
+  const capturePoint = toPagePoint(transform, token.x, token.y)
+
+  await page.mouse.move(capturePoint.x, capturePoint.y)
+  await page.mouse.down()
+  await expect
+    .poll(async () => (await readDebugState(page)).inputMode)
+    .toBe('hold')
+  await page.waitForTimeout(160)
+  const duringHold = await readDebugState(page)
+  expect(duringHold.activeToken?.y).toBeGreaterThan(token.y + 12)
+  await page.waitForTimeout(100)
+  const beforeCapture = await readDebugState(page)
+  expect(beforeCapture.inputMode).toBe('hold')
+  expect(beforeCapture.activeToken?.y).toBeGreaterThan(
+    (duringHold.activeToken?.y ?? token.y) + 12,
+  )
 
   await expect
-    .poll(async () => (await readDebugState(page)).captureCount)
+    .poll(async () => (await readDebugState(page)).captureCount, {
+      timeout: 1_000,
+    })
     .toBe(1)
+  await expect
+    .poll(async () => (await readDebugState(page)).lastAction)
+    .toBe('capture')
+  await page.waitForFunction(() => {
+    const debugWindow = window as PrototypeDebugWindow
+    return (
+      debugWindow.__NHN_GAME__?.scene
+        .getScene('prototype')
+        .getDebugState().captureEffectY !== null
+    )
+  })
+
+  const captureEffectStartY = (await readDebugState(page)).captureEffectY
+  if (captureEffectStartY === null) {
+    throw new Error('포획 이동 중인 음식의 Y 좌표를 찾을 수 없습니다.')
+  }
+  await page.waitForTimeout(70)
+  const captureEffectMiddleY = (await readDebugState(page)).captureEffectY
+  if (captureEffectMiddleY === null) {
+    throw new Error('포획 이동이 예상보다 일찍 종료됐습니다.')
+  }
+  await page.waitForTimeout(70)
+  const captureEffectLaterY = (await readDebugState(page)).captureEffectY
+  if (captureEffectLaterY === null) {
+    throw new Error('포획 이동이 예상보다 일찍 종료됐습니다.')
+  }
+  expect(captureEffectMiddleY).toBeLessThan(captureEffectStartY)
+  expect(captureEffectLaterY).toBeLessThan(captureEffectMiddleY)
+  await expect
+    .poll(async () => (await readDebugState(page)).filledCaptureSlotCount)
+    .toBe(1)
+
+  await waitForActiveToken(page)
+  const nextTokenBeforeRelease = (await readDebugState(page)).activeToken
+  expect(nextTokenBeforeRelease).not.toBeNull()
+  await page.mouse.up()
+  await page.waitForTimeout(100)
+
+  const afterLateRelease = await readDebugState(page)
+  expect(afterLateRelease.completedRounds).toBe(1)
+  expect(afterLateRelease.captureCount).toBe(1)
+  expect(afterLateRelease.inputMode).toBe('idle')
+  expect(afterLateRelease.activeToken?.menuId).toBe(
+    nextTokenBeforeRelease?.menuId,
+  )
+})
+test('모바일 길게 누르기로 이동 중인 음식을 포획한다', async (
+  { page },
+  testInfo,
+) => {
+  test.skip(
+    testInfo.project.name !== 'mobile-chromium',
+    '실제 터치 포획은 모바일 Chromium 프로젝트에서 검증합니다.',
+  )
+
+  await startSoloGame(page)
+  await waitForActiveToken(page)
+  const start = await readDebugState(page)
+  const token = start.activeToken
+
+  expect(token).not.toBeNull()
+  if (!token) {
+    return
+  }
+
+  const transform = await getCanvasTransform(page)
+  const capturePoint = toPagePoint(transform, token.x, token.y)
+  const cdp = await page.context().newCDPSession(page)
+
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [
+      { ...capturePoint, id: 1, radiusX: 1, radiusY: 1, force: 1 },
+    ],
+  })
+  await expect
+    .poll(async () => (await readDebugState(page)).inputMode)
+    .toBe('hold')
+  await expect
+    .poll(async () => (await readDebugState(page)).captureCount, {
+      timeout: 1_000,
+    })
+    .toBe(1)
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchEnd',
+    touchPoints: [],
+  })
+
   await expect
     .poll(async () => (await readDebugState(page)).lastAction)
     .toBe('capture')
@@ -275,6 +484,7 @@ test('토큰 주위에 원을 그리면 포획 슬롯을 사용한다', async (
     .poll(async () => (await readDebugState(page)).filledCaptureSlotCount)
     .toBe(1)
 })
+
 
 test('모바일 touchcancel은 동작이나 점수로 처리하지 않는다', async (
   { page },
@@ -287,7 +497,6 @@ test('모바일 touchcancel은 동작이나 점수로 처리하지 않는다', a
 
   await startSoloGame(page)
   await waitForActiveToken(page)
-  await pauseActiveToken(page)
   const start = await readDebugState(page)
   const token = start.activeToken
 
@@ -297,34 +506,32 @@ test('모바일 touchcancel은 동작이나 점수로 처리하지 않는다', a
   }
 
   const transform = await getCanvasTransform(page)
-  const gestureStart = toPagePoint(
-    transform,
-    token.x - token.judgement.radius - 24,
-    token.y,
-  )
-  const gestureEnd = toPagePoint(
-    transform,
-    token.x + token.judgement.radius + 24,
-    token.y,
-  )
+  const gestureStart = toPagePoint(transform, token.x, token.y)
   const cdp = await page.context().newCDPSession(page)
 
   await cdp.send('Input.dispatchTouchEvent', {
     type: 'touchStart',
     touchPoints: [{ ...gestureStart, id: 1, radiusX: 1, radiusY: 1, force: 1 }],
   })
-  await cdp.send('Input.dispatchTouchEvent', {
-    type: 'touchMove',
-    touchPoints: [{ ...gestureEnd, id: 1, radiusX: 1, radiusY: 1, force: 1 }],
-  })
+  await expect
+    .poll(async () => (await readDebugState(page)).inputMode)
+    .toBe('hold')
+  await page.waitForTimeout(100)
   await cdp.send('Input.dispatchTouchEvent', {
     type: 'touchCancel',
     touchPoints: [],
   })
+  await page.waitForTimeout(350)
 
   await expect
     .poll(async () => (await readDebugState(page)).pathPointCount)
     .toBe(0)
+  await expect
+    .poll(async () => (await readDebugState(page)).localPathPointCount)
+    .toBe(0)
+  await expect
+    .poll(async () => (await readDebugState(page)).inputMode)
+    .toBe('idle')
   await expect
     .poll(async () => (await readDebugState(page)).completedRounds)
     .toBe(0)
@@ -332,8 +539,9 @@ test('모바일 touchcancel은 동작이나 점수로 처리하지 않는다', a
     .poll(async () => (await readDebugState(page)).lastAction)
     .toBeNull()
   await expect
-    .poll(async () => (await readDebugState(page)).feedback)
-    .toContain('다시 시도')
-
-  await pauseActiveToken(page)
+    .poll(async () => (await readDebugState(page)).captureCount)
+    .toBe(0)
+  const afterCancel = await readDebugState(page)
+  expect(afterCancel.feedback).toContain('취소')
+  expect(afterCancel.activeToken?.y).toBeGreaterThan(token.y + 20)
 })
