@@ -94,6 +94,7 @@ export class PrototypeScene extends Phaser.Scene {
   private feedbackText!: Phaser.GameObjects.Text
   private activeToken: ActiveToken | null = null
   private holdCapture: HoldCaptureState | null = null
+  private activeCaptureEffect: Phaser.GameObjects.Container | null = null
   private captureSlots: CaptureSlot[] = []
   private filledCaptureSlotCount = 0
   private lastSliceAngleDegrees: number | null = null
@@ -186,6 +187,7 @@ export class PrototypeScene extends Phaser.Scene {
     this.holdCapture?.tween.stop()
     this.holdCapture?.graphics.destroy()
     this.activeToken = null
+    this.activeCaptureEffect = null
     this.holdCapture = null
     this.captureSlots = []
     this.filledCaptureSlotCount = 0
@@ -220,6 +222,7 @@ export class PrototypeScene extends Phaser.Scene {
         readonly height: number
       }
     } | null
+    readonly captureEffectY: number | null
     readonly completedRounds: number
     readonly captureCount: number
     readonly filledCaptureSlotCount: number
@@ -254,6 +257,7 @@ export class PrototypeScene extends Phaser.Scene {
             },
           }
         : null,
+      captureEffectY: this.activeCaptureEffect?.y ?? null,
       completedRounds: this.rounds.length,
       captureCount: this.rounds.filter(
         (round) => round.action.type === 'capture',
@@ -1008,6 +1012,7 @@ export class PrototypeScene extends Phaser.Scene {
     const slot = this.captureSlots[captureIndex]
     const target = slot?.center ?? { x: LOGICAL_WIDTH - 42, y: 113 }
 
+    this.activeCaptureEffect = token.container
     this.tweens.add({
       targets: token.container,
       x: target.x,
@@ -1016,8 +1021,11 @@ export class PrototypeScene extends Phaser.Scene {
       scale: 0.2,
       alpha: 0.9,
       duration: CAPTURE_EFFECT_DURATION_MS,
-      ease: 'Back.In',
+      ease: 'Cubic.Out',
       onComplete: () => {
+        if (this.activeCaptureEffect === token.container) {
+          this.activeCaptureEffect = null
+        }
         token.container.destroy()
         if (slot) {
           this.populateCaptureSlot(slot, token.menu)

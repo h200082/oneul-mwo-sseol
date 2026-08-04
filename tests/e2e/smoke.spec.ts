@@ -16,6 +16,7 @@ interface PrototypeDebugState {
       readonly height: number
     }
   } | null
+  readonly captureEffectY: number | null
   readonly completedRounds: number
   readonly captureCount: number
   readonly filledCaptureSlotCount: number
@@ -376,6 +377,13 @@ test('음식 위를 0.3초 길게 누르면 이동 중인 대상을 포획한다
   await page.waitForTimeout(160)
   const duringHold = await readDebugState(page)
   expect(duringHold.activeToken?.y).toBeGreaterThan(token.y + 12)
+  await page.waitForTimeout(100)
+  const beforeCapture = await readDebugState(page)
+  expect(beforeCapture.inputMode).toBe('hold')
+  expect(beforeCapture.activeToken?.y).toBeGreaterThan(
+    (duringHold.activeToken?.y ?? token.y) + 12,
+  )
+
   await expect
     .poll(async () => (await readDebugState(page)).captureCount, {
       timeout: 1_000,
@@ -384,6 +392,31 @@ test('음식 위를 0.3초 길게 누르면 이동 중인 대상을 포획한다
   await expect
     .poll(async () => (await readDebugState(page)).lastAction)
     .toBe('capture')
+  await page.waitForFunction(() => {
+    const debugWindow = window as PrototypeDebugWindow
+    return (
+      debugWindow.__NHN_GAME__?.scene
+        .getScene('prototype')
+        .getDebugState().captureEffectY !== null
+    )
+  })
+
+  const captureEffectStartY = (await readDebugState(page)).captureEffectY
+  if (captureEffectStartY === null) {
+    throw new Error('포획 이동 중인 음식의 Y 좌표를 찾을 수 없습니다.')
+  }
+  await page.waitForTimeout(70)
+  const captureEffectMiddleY = (await readDebugState(page)).captureEffectY
+  if (captureEffectMiddleY === null) {
+    throw new Error('포획 이동이 예상보다 일찍 종료됐습니다.')
+  }
+  await page.waitForTimeout(70)
+  const captureEffectLaterY = (await readDebugState(page)).captureEffectY
+  if (captureEffectLaterY === null) {
+    throw new Error('포획 이동이 예상보다 일찍 종료됐습니다.')
+  }
+  expect(captureEffectMiddleY).toBeLessThan(captureEffectStartY)
+  expect(captureEffectLaterY).toBeLessThan(captureEffectMiddleY)
   await expect
     .poll(async () => (await readDebugState(page)).filledCaptureSlotCount)
     .toBe(1)
