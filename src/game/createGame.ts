@@ -4,6 +4,7 @@ import {
   type GameLaunchOptions,
   type PlayerGameResultHandler,
 } from './gameTypes'
+import type { RoomGameProgressStore } from './gameProgress'
 import { PrototypeScene } from './scenes/PrototypeScene'
 
 export const LOGICAL_WIDTH = 390
@@ -13,6 +14,7 @@ export function createGame(
   parent: HTMLElement,
   launchOptions: GameLaunchOptions = DEFAULT_GAME_LAUNCH_OPTIONS,
   onGameResult?: PlayerGameResultHandler,
+  progressStore?: RoomGameProgressStore,
 ): Phaser.Game {
   return new Phaser.Game({
     type: Phaser.AUTO,
@@ -33,6 +35,8 @@ export function createGame(
     input: {
       activePointers: 2,
     },
-    scene: [new PrototypeScene(launchOptions, onGameResult)],
+    scene: [
+      new PrototypeScene(launchOptions, onGameResult, progressStore),
+    ],
   })
 }

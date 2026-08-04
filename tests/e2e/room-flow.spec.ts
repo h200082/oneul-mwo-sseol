@@ -6,9 +6,17 @@ import {
 } from '../../src/domain/room'
 
 interface RoomGameDebugState {
+  readonly activeToken: {
+    readonly x: number
+    readonly y: number
+  } | null
   readonly mealTime: 'lunch' | 'dinner'
   readonly deckSeed: string | number
   readonly deckMenuIds: readonly string[]
+  readonly completedRounds: number
+  readonly captureCount: number
+  readonly filledCaptureSlotCount: number
+  readonly lastAction: 'slice' | 'capture' | 'miss' | null
 }
 
 interface AppResultDebugState {
@@ -422,7 +430,36 @@ test('게임 중 새로고침하면 같은 덱의 시작된 방으로 복귀한�
     timeout: GAME_CANVAS_TIMEOUT_MS,
   })
 
+  await expect
+    .poll(async () => (await readRoomGameDebugState(page)).activeToken)
+    .not.toBeNull()
+  const activeToken = (await readRoomGameDebugState(page)).activeToken
+  const canvasBounds = await page.locator('#game-root canvas').boundingBox()
+  expect(activeToken).not.toBeNull()
+  expect(canvasBounds).not.toBeNull()
+  if (!activeToken || !canvasBounds) {
+    return
+  }
+
+  await page.mouse.move(
+    canvasBounds.x + (activeToken.x / 390) * canvasBounds.width,
+    canvasBounds.y + (activeToken.y / 844) * canvasBounds.height,
+  )
+  await page.mouse.down()
+  await page.waitForTimeout(380)
+  await page.mouse.up()
+
+  await expect
+    .poll(
+      async () =>
+        (await readRoomGameDebugState(page)).filledCaptureSlotCount,
+    )
+    .toBe(1)
   const beforeReload = await readRoomGameDebugState(page)
+  expect(beforeReload.completedRounds).toBe(1)
+  expect(beforeReload.captureCount).toBe(1)
+  expect(beforeReload.lastAction).toBe('capture')
+
   await page.reload()
   await expect(page.getByLabel('닉네임')).toHaveValue('복귀 방장')
   await expect(page.getByLabel('방 코드')).toHaveValue(roomCode)
@@ -435,6 +472,12 @@ test('게임 중 새로고침하면 같은 덱의 시작된 방으로 복귀한�
   expect(afterReload.mealTime).toBe('dinner')
   expect(afterReload.deckSeed).toBe(beforeReload.deckSeed)
   expect(afterReload.deckMenuIds).toEqual(beforeReload.deckMenuIds)
+  expect(afterReload.completedRounds).toBe(beforeReload.completedRounds)
+  expect(afterReload.lastAction).toBe(beforeReload.lastAction)
+  expect(afterReload.captureCount).toBe(beforeReload.captureCount)
+  expect(afterReload.filledCaptureSlotCount).toBe(
+    beforeReload.filledCaptureSlotCount,
+  )
 })
 
 test('결과 대기 중 새로고침하면 게임을 재실행하지 않고 대기로 복귀한다', async ({

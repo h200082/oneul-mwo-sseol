@@ -3,12 +3,15 @@ import type {
   RoomDeckSeed,
 } from '../domain/room'
 import type { PlayerScoreSummary } from '../domain/gameRules'
+import type { RoomGameProgressIdentity } from './gameProgress'
 
 export interface GameLaunchOptions {
   readonly mode: 'solo' | 'room'
   readonly mealTime: MealTime
   readonly deckSeed: RoomDeckSeed
   readonly roomCode?: string
+  /** Present only for a resumable multiplayer run. */
+  readonly progressIdentity?: Readonly<RoomGameProgressIdentity>
 }
 
 /**

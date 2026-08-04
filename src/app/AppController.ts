@@ -23,6 +23,11 @@ import type {
   PlayerGameResult,
 } from '../game/gameTypes'
 import {
+  createRoomGameProgressIdentity,
+  RoomGameProgressStore,
+  type RoomGameProgressIdentity,
+} from '../game/gameProgress'
+import {
   QrScannerError,
   scanRoomCodeFromCamera,
 } from '../qr/QrScannerService'
@@ -99,6 +104,7 @@ export class AppController {
   private readonly gameHost: GameHost
   private readonly playerId: string
   private readonly backend: AppBackend
+  private readonly gameProgressStore: RoomGameProgressStore
   private unsubscribeRoom: (() => void) | null = null
   private unsubscribeResults: (() => void) | null = null
   private countdownInterval: number | null = null
@@ -132,6 +138,7 @@ export class AppController {
     this.backend =
       options.backend ??
       (roomGateway instanceof LocalRoomGateway ? 'local' : 'firebase')
+    this.gameProgressStore = new RoomGameProgressStore(window.localStorage)
     this.gameHost = new GameHost(this.gameRoot, () => {
       this.returnHome()
     }, (result) => {
@@ -140,7 +147,7 @@ export class AppController {
           void this.handleGameResult(result)
         })
       }
-    })
+    }, this.gameProgressStore)
   }
 
   start(): void {
@@ -773,17 +780,16 @@ export class AppController {
 
     const delay = Math.max(0, room.start.startAt - Date.now())
     this.gameStartTimeout = window.setTimeout(() => {
-      this.startGame({
-        mode: 'room',
-        mealTime: room.mealTime,
-        deckSeed: room.start.deckSeed,
-        roomCode: room.code,
-      })
+      this.startGame(this.createRoomGameLaunchOptions(room))
       this.scheduleRoomResultDeadline(room)
     }, delay)
   }
 
   private startGame(options: GameLaunchOptions): void {
+    this.gameProgressStore.clearForPlayerExcept(
+      this.playerId,
+      options.progressIdentity ?? null,
+    )
     this.viewGeneration += 1
     this.cleanupRoomSubscription()
     this.cleanupResultSubscription()
@@ -792,6 +798,29 @@ export class AppController {
     this.clearCountdown()
     this.screenRoot.hidden = true
     this.gameHost.start(options)
+  }
+
+  private createRoomGameLaunchOptions(
+    room: StartedRoom,
+  ): GameLaunchOptions {
+    return {
+      mode: 'room',
+      mealTime: room.mealTime,
+      deckSeed: room.start.deckSeed,
+      roomCode: room.code,
+      progressIdentity: this.createRoomProgressIdentity(room),
+    }
+  }
+
+  private createRoomProgressIdentity(
+    room: StartedRoom,
+  ): Readonly<RoomGameProgressIdentity> {
+    return createRoomGameProgressIdentity(
+      this.playerId,
+      room.code,
+      room.start.startAt,
+      room.start.deckSeed,
+    )
   }
 
   private assertCanResumeStartedRoom(
@@ -828,13 +857,11 @@ export class AppController {
     const ownResult = resultState.results.find(
       (result) => result.playerId === this.playerId,
     )
+    if (ownResult || resultState.finalization === 'closed') {
+      this.gameProgressStore.clear(this.createRoomProgressIdentity(room))
+    }
     if (resultState.finalization === 'open' && !ownResult) {
-      this.startGame({
-        mode: 'room',
-        mealTime: room.mealTime,
-        deckSeed: room.start.deckSeed,
-        roomCode: room.code,
-      })
+      this.startGame(this.createRoomGameLaunchOptions(room))
       this.scheduleRoomResultDeadline(room)
       return
     }
@@ -1002,6 +1029,9 @@ export class AppController {
     const submissionTask = this.roomGateway
       .submitResult(flow.room.code, flow.submission)
       .then((results) => {
+        this.gameProgressStore.clear(
+          this.createRoomProgressIdentity(flow.room),
+        )
         if (this.isActiveResultFlow(flow)) {
           this.handleRoomResultsSnapshot(flow, results)
         }
@@ -1055,6 +1085,9 @@ export class AppController {
     }
 
     flow.complete = true
+    this.gameProgressStore.clear(
+      this.createRoomProgressIdentity(flow.room),
+    )
     this.cleanupResultSubscription()
     this.clearRoomResultDeadline()
     this.renderRoomResultsSummary(flow.room, resolution.summary)
@@ -1718,6 +1751,7 @@ export class AppController {
   }
 
   private returnHome(): void {
+    this.gameProgressStore.clearForPlayer(this.playerId)
     const url = new URL(window.location.href)
     url.searchParams.delete('room')
     window.history.replaceState({}, '', url)

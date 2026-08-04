@@ -5,6 +5,7 @@ import type {
   GameLaunchOptions,
   PlayerGameResultHandler,
 } from '../game/gameTypes'
+import type { RoomGameProgressStore } from '../game/gameProgress'
 
 type DebugWindow = Window & {
   __NHN_GAME__?: Phaser.Game
@@ -17,6 +18,7 @@ export class GameHost {
     private readonly root: HTMLElement,
     private readonly onReturnHome: () => void,
     private readonly onGameResult?: PlayerGameResultHandler,
+    private readonly progressStore?: RoomGameProgressStore,
   ) {}
 
   start(options: GameLaunchOptions): Phaser.Game {
@@ -27,6 +29,7 @@ export class GameHost {
       this.root,
       options,
       this.onGameResult,
+      this.progressStore,
     )
     this.game = game
     game.events.once('return-home', this.onReturnHome)
