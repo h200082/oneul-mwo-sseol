@@ -110,12 +110,36 @@ test('방장은 두 번째 참가자가 들어오면 준비 버튼 없이 시작
   ).toHaveCount(0)
 
   const participantPage = await context.newPage()
-  await participantPage.goto(`/?room=${roomCode.toLowerCase()}`)
+  const invitePath = `/?room=${roomCode.toLowerCase()}`
+  await participantPage.goto(invitePath)
+
+  await expect(participantPage.getByTestId('invite-home')).toBeVisible()
   await expect(participantPage.getByLabel('방 코드')).toHaveValue(roomCode)
+  await expect(participantPage.getByLabel('방 코드')).toHaveAttribute(
+    'readonly',
+    '',
+  )
+  await expect(participantPage.getByLabel('닉네임')).toBeFocused()
+  await expect(participantPage.getByTestId('solo-start')).toBeHidden()
+  await expect(participantPage.getByTestId('create-room')).toBeHidden()
+  await expect(participantPage.getByTestId('scan-qr')).toBeHidden()
+  await expect(participantPage.getByLabel('점심')).toBeHidden()
+  await expect(participantPage.getByTestId('join-room')).toHaveText(
+    '이 방에 참가',
+  )
+
+  await participantPage.getByTestId('cancel-invite').click()
+  await expect(participantPage).not.toHaveURL(/[?&]room=/u)
+  await expect(participantPage.getByTestId('invite-home')).toHaveCount(0)
+  await expect(participantPage.getByTestId('create-room')).toBeVisible()
+
+  await participantPage.goto(invitePath)
+  await expect(participantPage.getByTestId('invite-home')).toBeVisible()
   await participantPage.getByLabel('닉네임').fill('참가자')
-  await participantPage.getByTestId('join-room').click()
+  await participantPage.getByLabel('닉네임').press('Enter')
 
   await expect(page.getByTestId('player-count')).toHaveText('2/8')
+  await expect(participantPage.getByTestId('player-count')).toHaveText('2/8')
   await expect(page.getByTestId('start-room')).toBeEnabled()
   await expect(page.getByTestId('start-room')).toHaveText('2명으로 시작')
 
@@ -138,6 +162,44 @@ test('방장은 두 번째 참가자가 들어오면 준비 버튼 없이 시작
   expect(participantState.deckSeed).toBe(hostState.deckSeed)
   expect(participantState.deckMenuIds).toEqual(hostState.deckMenuIds)
   expect(hostState.deckMenuIds).toHaveLength(20)
+})
+
+test('저장된 닉네임이 있으면 초대 링크에서 같은 방으로 자동 참가한다', async ({
+  page,
+  context,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === 'mobile-chromium',
+    '멀티탭 동기화 E2E는 데스크톱 프로젝트에서 한 번 검증합니다.',
+  )
+
+  await page.goto('/')
+  await page.getByLabel('닉네임').fill('자동입장 방장')
+  await page.getByTestId('create-room').click()
+
+  const roomCode = (await page.getByTestId('room-code').textContent())?.trim()
+  expect(roomCode).toBeTruthy()
+  if (!roomCode) {
+    return
+  }
+
+  const participantPage = await context.newPage()
+  await participantPage.addInitScript(() => {
+    sessionStorage.setItem(
+      'oneul-mwo-sseol-nickname',
+      '자동참가자',
+    )
+  })
+  await participantPage.goto(`/?room=${roomCode}`)
+
+  await expect(participantPage.getByTestId('invite-home')).toHaveCount(0)
+  await expect(page.getByTestId('player-count')).toHaveText('2/8')
+  await expect(participantPage.getByTestId('player-count')).toHaveText('2/8')
+  await expect(
+    participantPage
+      .getByTestId('player-list')
+      .getByText('자동참가자', { exact: true }),
+  ).toBeVisible()
 })
 
 test('두 탭의 결과를 기다렸다가 같은 순위와 겹침 메뉴를 공개한다', async ({
@@ -385,11 +447,6 @@ test('대기실을 새로고침한 플레이어가 같은 자리로 복귀한다
 
   await expect(page).toHaveURL(new RegExp(`[?&]room=${roomCode}`))
   await page.reload()
-  await expect(page.getByLabel('닉네임')).toHaveValue('새로고침 방장')
-  await expect(page.getByLabel('방 코드')).toHaveValue(roomCode)
-
-  await page.getByTestId('join-room').click()
-
   await expect(page.getByTestId('player-count')).toHaveText('1/8')
   await expect(page.getByTestId('start-room')).toBeVisible()
   await expect(page.getByTestId('start-room')).toBeDisabled()
@@ -461,9 +518,6 @@ test('게임 중 새로고침하면 같은 덱의 시작된 방으로 복귀한�
   expect(beforeReload.lastAction).toBe('capture')
 
   await page.reload()
-  await expect(page.getByLabel('닉네임')).toHaveValue('복귀 방장')
-  await expect(page.getByLabel('방 코드')).toHaveValue(roomCode)
-  await page.getByTestId('join-room').click()
 
   await expect(page.locator('#game-root canvas')).toBeVisible({
     timeout: GAME_CANVAS_TIMEOUT_MS,
@@ -522,9 +576,6 @@ test('결과 대기 중 새로고침하면 게임을 재실행하지 않고 대�
   await expect(page.getByTestId('result-progress')).toHaveText('1/2')
 
   await page.reload()
-  await expect(page.getByLabel('닉네임')).toHaveValue('결과 복귀 방장')
-  await expect(page.getByLabel('방 코드')).toHaveValue(roomCode)
-  await page.getByTestId('join-room').click()
 
   await expect(page.locator('#game-root canvas')).toHaveCount(0)
   await expect(page.getByTestId('room-results-waiting')).toBeVisible()

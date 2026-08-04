@@ -232,6 +232,45 @@
   margin-top: 9px;
 }
 
+.home-screen-invite .meal-picker,
+.home-screen-invite .primary-actions,
+.home-screen-invite .scan-button,
+.home-screen-invite .prototype-note {
+  display: none;
+}
+
+.home-screen-invite .setup-card h2 {
+  color: #ffd76a;
+  font-size: 20px;
+  line-height: 1.35;
+}
+
+.home-screen-invite .join-row {
+  grid-template-columns: 1fr;
+}
+
+.home-screen-invite .code-input {
+  border-color: rgb(85 230 209 / 52%);
+  color: #55e6d1;
+  font-size: 18px;
+  text-align: center;
+}
+
+.home-screen-invite .join-row .button {
+  width: 100%;
+}
+
+.home-screen-invite .form-status {
+  min-height: 34px;
+  font-size: 12px;
+  text-align: center;
+}
+
+.invite-cancel-button {
+  width: 100%;
+  margin-top: 9px;
+}
+
 .prototype-note,
 .form-status {
   margin: 0 4px;

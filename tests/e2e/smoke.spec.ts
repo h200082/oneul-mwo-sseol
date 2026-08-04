@@ -160,6 +160,27 @@ test('홈에서 핵심 시작 방법을 표시한다', async ({ page }) => {
   await expect(page.locator('#game-root canvas')).toHaveCount(0)
 })
 
+test('QR 초대 링크는 모바일에서도 일반 홈 대신 초대 화면을 연다', async ({
+  page,
+}) => {
+  await page.goto('/?room=ABCD2EFG')
+
+  await expect(page.getByTestId('invite-home')).toBeVisible()
+  await expect(
+    page.getByRole('heading', { name: '방 ABCD2EFG에 초대됐어요' }),
+  ).toBeVisible()
+  await expect(page.getByLabel('닉네임')).toBeFocused()
+  await expect(page.getByLabel('방 코드')).toHaveValue('ABCD2EFG')
+  await expect(page.getByLabel('방 코드')).toHaveAttribute('readonly', '')
+  await expect(page.getByTestId('join-room')).toHaveText('이 방에 참가')
+  await expect(page.getByTestId('join-room')).toBeInViewport()
+  await expect(page.getByTestId('cancel-invite')).toBeVisible()
+  await expect(page.getByTestId('solo-start')).toBeHidden()
+  await expect(page.getByTestId('create-room')).toBeHidden()
+  await expect(page.getByTestId('scan-qr')).toBeHidden()
+  await expect(page.getByLabel('점심')).toBeHidden()
+})
+
 test('대표 음식 이미지를 Phaser 토큰으로 등록한다', async ({ page }) => {
   await startVisualGameForTest(page)
   await waitForActiveToken(page)
