@@ -534,6 +534,115 @@ describeWithEmulator('Cloud Firestore security rules', () => {
     }
   })
 
+  it('delivers the started room to a late guest subscriber without cached regression', async () => {
+    const hostGateway = new FirebaseRoomGateway(
+      testEnvironment
+        .authenticatedContext('late-host-uid')
+        .firestore() as unknown as Firestore,
+      'late-host-uid',
+      { rng: () => 0 },
+    )
+    const memberGateway = new FirebaseRoomGateway(
+      testEnvironment
+        .authenticatedContext('late-member-uid')
+        .firestore() as unknown as Firestore,
+      'late-member-uid',
+    )
+    const hostStates: string[] = []
+    const memberStates: string[] = []
+    const listenerErrors: unknown[] = []
+    let unsubscribeHost: (() => void) | undefined
+    let unsubscribeMember: (() => void) | undefined
+
+    const describeRoom = (
+      room: Awaited<ReturnType<FirebaseRoomGateway['get']>>,
+    ): string => {
+      if (!room) {
+        return 'missing'
+      }
+      const playerIds = room.players
+        .map((player) => player.playerId)
+        .join(',')
+      const rosterIds =
+        room.status === 'started'
+          ? room.start.roster
+              .map((player) => player.playerId)
+              .join(',')
+          : ''
+      return [room.status, playerIds, rosterIds].join('|')
+    }
+
+    try {
+      const created = await hostGateway.create({
+        mealTime: 'lunch',
+        playerId: 'late-host-uid',
+        nickname: 'Late host',
+      })
+      unsubscribeHost = await hostGateway.subscribe(
+        created.code,
+        (room) => hostStates.push(describeRoom(room)),
+        (error) => listenerErrors.push(error),
+      )
+
+      const preflight = await memberGateway.get(created.code)
+      expect(describeRoom(preflight)).toBe(
+        'waiting|late-host-uid|',
+      )
+
+      const joined = await memberGateway.join(created.code, {
+        playerId: 'late-member-uid',
+        nickname: 'Late member',
+      })
+      expect(describeRoom(joined)).toBe(
+        'waiting|late-host-uid,late-member-uid|',
+      )
+
+      await vi.waitFor(
+        () => {
+          expect(hostStates.at(-1)).toBe(
+            'waiting|late-host-uid,late-member-uid|',
+          )
+        },
+        { timeout: 5_000 },
+      )
+
+      const started = await hostGateway.start(created.code, {
+        requesterPlayerId: 'late-host-uid',
+        deckSeed: 'late-subscription-seed',
+        contentVersion: 'menus-v1',
+        startAt: Date.now() + 3_000,
+      })
+      const expectedStarted =
+        'started|late-host-uid,late-member-uid|' +
+        'late-host-uid,late-member-uid'
+      expect(describeRoom(started)).toBe(expectedStarted)
+
+      unsubscribeMember = await memberGateway.subscribe(
+        created.code,
+        (room) => memberStates.push(describeRoom(room)),
+        (error) => listenerErrors.push(error),
+      )
+
+      await vi.waitFor(
+        () => {
+          expect(hostStates.at(-1)).toBe(expectedStarted)
+          expect(memberStates.at(-1)).toBe(expectedStarted)
+        },
+        { timeout: 5_000 },
+      )
+      expect(memberStates.length).toBeGreaterThan(0)
+      expect(
+        memberStates.every((state) => state === expectedStarted),
+      ).toBe(true)
+      expect(listenerErrors).toEqual([])
+    } finally {
+      unsubscribeMember?.()
+      unsubscribeHost?.()
+      hostGateway.dispose()
+      memberGateway.dispose()
+    }
+  })
+
   async function seedRoom(
     room: Record<string, unknown>,
     roomCode = ROOM_CODE,

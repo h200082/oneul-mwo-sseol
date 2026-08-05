@@ -1,7 +1,6 @@
 import {
   collection,
   doc,
-  getDoc,
   getDocFromServer,
   getDocsFromServer,
   onSnapshot,
@@ -158,7 +157,7 @@ export class FirebaseRoomGateway implements RoomGateway {
 
   async get(roomCode: string): Promise<Room | null> {
     const code = normalizeRoomCode(roomCode)
-    const snapshot = await getDoc(this.roomRef(code))
+    const snapshot = await getDocFromServer(this.roomRef(code))
     return snapshot.exists()
       ? decodeRoomSnapshot(snapshot.data(), code)
       : null
@@ -200,7 +199,15 @@ export class FirebaseRoomGateway implements RoomGateway {
     return this.trackUnsubscriber(
       onSnapshot(
         this.roomRef(code),
+        { includeMetadataChanges: true },
         (snapshot) => {
+          if (
+            snapshot.metadata.fromCache ||
+            snapshot.metadata.hasPendingWrites
+          ) {
+            return
+          }
+
           try {
             if (!snapshot.exists()) {
               listener(null)
