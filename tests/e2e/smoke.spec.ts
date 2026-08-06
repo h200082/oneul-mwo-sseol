@@ -29,6 +29,7 @@ interface PrototypeDebugState {
   readonly cleanedSlicePieceCount: number
   readonly lastAction: 'slice' | 'capture' | 'miss' | null
   readonly feedback: string
+  readonly introVisible: boolean
 }
 
 interface PrototypeDebugWindow extends Window {
@@ -100,9 +101,44 @@ function toPagePoint(transform: CanvasTransform, x: number, y: number) {
   }
 }
 
+async function tapGameCanvas(page: Page): Promise<void> {
+  const canvas = page.locator('#game-root canvas')
+  const hasTouch = await page.evaluate(() => navigator.maxTouchPoints > 0)
+
+  if (hasTouch) {
+    await canvas.tap({ position: { x: 12, y: 12 } })
+  } else {
+    await canvas.click({ position: { x: 12, y: 12 } })
+  }
+}
+
+async function skipSoloIntro(page: Page): Promise<void> {
+  await page.waitForFunction(() => {
+    const debugWindow = window as PrototypeDebugWindow
+    const scene = debugWindow.__NHN_GAME__?.scene.getScene('prototype')
+
+    if (!scene) {
+      return false
+    }
+
+    const state = scene.getDebugState()
+    return state.introVisible || state.activeToken !== null
+  })
+
+  if (!(await readDebugState(page)).introVisible) {
+    return
+  }
+
+  await tapGameCanvas(page)
+  await expect
+    .poll(async () => (await readDebugState(page)).introVisible)
+    .toBe(false)
+}
+
 async function startSoloGame(page: Page): Promise<void> {
   await page.getByTestId('solo-start').click()
   await expect(page.locator('#game-root canvas')).toBeVisible()
+  await skipSoloIntro(page)
 }
 
 async function startVisualGameForTest(page: Page): Promise<void> {
@@ -120,6 +156,7 @@ async function startVisualGameForTest(page: Page): Promise<void> {
     app.getDebugState().startSoloGameForTest(7)
   })
   await expect(page.locator('#game-root canvas')).toBeVisible()
+  await skipSoloIntro(page)
 }
 
 test.beforeEach(async ({ page }) => {
@@ -150,6 +187,36 @@ test('crypto.randomUUID가 없는 모바일 HTTP 환경에서도 혼자 하기�
   expect(pageErrors).toEqual([])
 })
 
+test('혼자 하기 인트로를 탭해 건너뛰어도 첫 라운드를 소모하지 않는다', async ({
+  page,
+}) => {
+  await page.getByTestId('solo-start').click()
+  await expect(page.locator('#game-root canvas')).toBeVisible()
+  await page.waitForFunction(() => {
+    const debugWindow = window as PrototypeDebugWindow
+    const scene = debugWindow.__NHN_GAME__?.scene.getScene('prototype')
+    return scene?.getDebugState().introVisible === true
+  })
+
+  const duringIntro = await readDebugState(page)
+  expect(duringIntro.introVisible).toBe(true)
+  expect(duringIntro.activeToken).toBeNull()
+  expect(duringIntro.completedRounds).toBe(0)
+  expect(duringIntro.captureCount).toBe(0)
+  expect(duringIntro.lastAction).toBeNull()
+
+  await tapGameCanvas(page)
+  await expect
+    .poll(async () => (await readDebugState(page)).introVisible)
+    .toBe(false)
+  await waitForActiveToken(page)
+
+  const firstRound = await readDebugState(page)
+  expect(firstRound.activeToken).not.toBeNull()
+  expect(firstRound.completedRounds).toBe(0)
+  expect(firstRound.captureCount).toBe(0)
+  expect(firstRound.lastAction).toBeNull()
+})
 test('홈에서 핵심 시작 방법을 표시한다', async ({ page }) => {
   await expect(page).toHaveTitle('오늘 뭐 썰?')
   await expect(page.getByRole('heading', { name: '오늘 뭐 썰?' })).toBeVisible()
@@ -157,6 +224,18 @@ test('홈에서 핵심 시작 방법을 표시한다', async ({ page }) => {
   await expect(page.getByTestId('create-room')).toBeVisible()
   await expect(page.getByTestId('join-room')).toBeVisible()
   await expect(page.getByTestId('scan-qr')).toBeVisible()
+  const gameGuide = page.getByTestId('game-guide')
+  await expect(gameGuide).toBeVisible()
+  await expect(gameGuide).not.toHaveAttribute('open', '')
+  await expect(gameGuide.locator('.game-guide-content')).toBeHidden()
+  await gameGuide.getByText('게임 방법', { exact: true }).click()
+  await expect(gameGuide).toHaveAttribute('open', '')
+  await expect(gameGuide.locator('.game-guide-content')).toBeVisible()
+  await expect(gameGuide).toContainText('드래그해서 음식을 반으로 썰어요')
+  await expect(gameGuide).toContainText('0.3초 꾹')
+  await expect(gameGuide).toContainText('최대 2번')
+  await expect(gameGuide).toContainText('놓친 음식은 0점')
+  await expect(gameGuide).toContainText('평균 점수에서 제외')
   await expect(page.locator('#game-root canvas')).toHaveCount(0)
 })
 
@@ -179,6 +258,7 @@ test('QR 초대 링크는 모바일에서도 일반 홈 대신 초대 화면을 
   await expect(page.getByTestId('create-room')).toBeHidden()
   await expect(page.getByTestId('scan-qr')).toBeHidden()
   await expect(page.getByLabel('점심')).toBeHidden()
+  await expect(page.getByTestId('game-guide')).toHaveCount(0)
 })
 
 test('대표 음식 이미지를 Phaser 토큰으로 등록한다', async ({ page }) => {
@@ -455,6 +535,81 @@ test('음식 위를 0.3초 길게 누르면 이동 중인 대상을 포획한다
   expect(afterLateRelease.activeToken?.menuId).toBe(
     nextTokenBeforeRelease?.menuId,
   )
+})
+test('모바일 터치 드래그로 이동 중인 음식을 베어낸다', async (
+  { page },
+  testInfo,
+) => {
+  test.skip(
+    testInfo.project.name !== 'mobile-chromium',
+    '실제 터치 베기는 모바일 Chromium 프로젝트에서 검증합니다.',
+  )
+
+  await startSoloGame(page)
+  await waitForActiveToken(page)
+  const start = await readDebugState(page)
+  const token = start.activeToken
+
+  expect(token).not.toBeNull()
+  if (!token) {
+    return
+  }
+
+  const transform = await getCanvasTransform(page)
+  const startPoint = toPagePoint(
+    transform,
+    token.x - token.judgement.radius * 1.5,
+    token.y,
+  )
+  const endPoint = toPagePoint(
+    transform,
+    token.x + token.judgement.radius * 1.5,
+    token.y,
+  )
+  const cdp = await page.context().newCDPSession(page)
+  const touchPoint = (x: number, y: number) => ({
+    x,
+    y,
+    id: 1,
+    radiusX: 1,
+    radiusY: 1,
+    force: 1,
+  })
+
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [touchPoint(startPoint.x, startPoint.y)],
+  })
+  await expect
+    .poll(async () => (await readDebugState(page)).inputMode)
+    .toBe('slice')
+
+  for (let step = 1; step <= 6; step += 1) {
+    const progress = step / 6
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchMove',
+      touchPoints: [
+        touchPoint(
+          startPoint.x + (endPoint.x - startPoint.x) * progress,
+          startPoint.y + (endPoint.y - startPoint.y) * progress,
+        ),
+      ],
+    })
+  }
+
+  await cdp.send('Input.dispatchTouchEvent', {
+    type: 'touchEnd',
+    touchPoints: [],
+  })
+
+  await expect
+    .poll(async () => (await readDebugState(page)).completedRounds)
+    .toBe(1)
+  await expect
+    .poll(async () => (await readDebugState(page)).lastAction)
+    .toBe('slice')
+  const afterSlice = await readDebugState(page)
+  expect(afterSlice.captureCount).toBe(0)
 })
 test('모바일 길게 누르기로 이동 중인 음식을 포획한다', async (
   { page },

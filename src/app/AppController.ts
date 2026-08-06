@@ -18,6 +18,11 @@ import {
 } from '../domain/roomResultResolution'
 import { MENU_CATALOG, type MenuItem } from '../data/menus'
 import { getMenuVisual } from '../data/menuVisuals'
+import {
+  createBrowserSensoryFeedback,
+  type SensoryFeedback,
+  type SensoryFeedbackDebugState,
+} from '../feedback/SensoryFeedback'
 import type {
   GameLaunchOptions,
   PlayerGameResult,
@@ -65,6 +70,7 @@ export type AppBackend = 'local' | 'firebase'
 export interface AppControllerOptions {
   readonly playerId?: string
   readonly backend?: AppBackend
+  readonly sensoryFeedback?: SensoryFeedback
 }
 
 export interface AppDebugRoomResultInput {
@@ -93,6 +99,7 @@ export interface AppDebugState {
   readonly roomCode: string | null
   readonly room: Room | null
   readonly roomSync: Readonly<AppDebugRoomSyncState>
+  readonly sensoryFeedback: Readonly<SensoryFeedbackDebugState>
   readonly gameVisible: boolean
   readonly startSoloGameForTest: (
     deckSeed: GameLaunchOptions['deckSeed'],
@@ -122,6 +129,7 @@ export class AppController {
   private readonly playerId: string
   private readonly backend: AppBackend
   private readonly gameProgressStore: RoomGameProgressStore
+  private readonly sensoryFeedback: SensoryFeedback
   private unsubscribeRoom: (() => void) | null = null
   private unsubscribeResults: (() => void) | null = null
   private countdownInterval: number | null = null
@@ -146,6 +154,38 @@ export class AppController {
   private homeActionPending = false
   private activeHomeAction: symbol | null = null
   private activeRoomResultFlow: ActiveRoomResultFlow | null = null
+  private readonly sensoryPointerUpHandler = (
+    event: PointerEvent,
+  ): void => {
+    if (event.pointerType !== 'mouse' && !event.isPrimary) {
+      return
+    }
+    const unlockTask = this.sensoryFeedback.unlock()
+    this.sensoryFeedback.releaseGesture()
+    void unlockTask
+  }
+  private readonly sensoryKeyboardActivationHandler = (): void => {
+    void this.sensoryFeedback.unlock()
+  }
+  private readonly sensoryPointerCancelHandler = (
+    event: PointerEvent,
+  ): void => {
+    if (event.pointerType !== 'mouse' && !event.isPrimary) {
+      return
+    }
+    this.sensoryFeedback.cancelPrimedGesture()
+  }
+  private readonly sensoryPointerDownHandler = (
+    event: PointerEvent,
+  ): void => {
+    if (event.pointerType === 'mouse') {
+      void this.sensoryFeedback.unlock()
+      return
+    }
+    if (event.isPrimary) {
+      this.sensoryFeedback.primeForGesture()
+    }
+  }
 
   constructor(
     private readonly appRoot: HTMLElement,
@@ -167,6 +207,28 @@ export class AppController {
       options.backend ??
       (roomGateway instanceof LocalRoomGateway ? 'local' : 'firebase')
     this.gameProgressStore = new RoomGameProgressStore(window.localStorage)
+    this.sensoryFeedback =
+      options.sensoryFeedback ?? createBrowserSensoryFeedback()
+    this.appRoot.addEventListener(
+      'pointerdown',
+      this.sensoryPointerDownHandler,
+      true,
+    )
+    this.appRoot.addEventListener(
+      'pointerup',
+      this.sensoryPointerUpHandler,
+      true,
+    )
+    this.appRoot.addEventListener(
+      'pointercancel',
+      this.sensoryPointerCancelHandler,
+      true,
+    )
+    this.appRoot.addEventListener(
+      'keydown',
+      this.sensoryKeyboardActivationHandler,
+      true,
+    )
     this.gameHost = new GameHost(this.gameRoot, () => {
       this.returnHome()
     }, (result) => {
@@ -175,7 +237,7 @@ export class AppController {
           void this.handleGameResult(result)
         })
       }
-    }, this.gameProgressStore)
+    }, this.gameProgressStore, this.sensoryFeedback)
   }
 
   start(): void {
@@ -188,7 +250,28 @@ export class AppController {
     this.activeHomeAction = null
     this.homeActionPending = false
     this.cleanupRoomFlow()
+    this.appRoot.removeEventListener(
+      'pointerdown',
+      this.sensoryPointerDownHandler,
+      true,
+    )
+    this.appRoot.removeEventListener(
+      'pointerup',
+      this.sensoryPointerUpHandler,
+      true,
+    )
+    this.appRoot.removeEventListener(
+      'pointercancel',
+      this.sensoryPointerCancelHandler,
+      true,
+    )
+    this.appRoot.removeEventListener(
+      'keydown',
+      this.sensoryKeyboardActivationHandler,
+      true,
+    )
     this.gameHost.stop()
+    this.sensoryFeedback.destroy()
     this.roomGateway.dispose?.()
     this.screenRoot.remove()
   }
@@ -205,6 +288,7 @@ export class AppController {
         retryCount: this.roomSyncRetryCount,
         errorCode: this.roomSyncErrorCode,
       }),
+      sensoryFeedback: this.sensoryFeedback.getDebugState(),
       gameVisible: !this.gameRoot.hidden,
       startSoloGameForTest: (deckSeed) => {
         if (!import.meta.env.DEV) {
@@ -238,6 +322,54 @@ export class AppController {
     }
   }
 
+  private updateHomeFeedbackControls(): void {
+    const soundToggle =
+      this.screenRoot.querySelector<HTMLButtonElement>(
+        '[data-testid="sound-toggle"]',
+      )
+    const hapticsToggle =
+      this.screenRoot.querySelector<HTMLButtonElement>(
+        '[data-testid="haptics-toggle"]',
+      )
+    if (!soundToggle || !hapticsToggle) {
+      return
+    }
+
+    soundToggle.setAttribute(
+      'aria-pressed',
+      String(this.sensoryFeedback.soundEnabled),
+    )
+    soundToggle.setAttribute(
+      'aria-label',
+      `효과음 ${this.sensoryFeedback.soundEnabled ? '끄기' : '켜기'}`,
+    )
+    soundToggle.innerHTML =
+      '<span aria-hidden="true">♪</span><span>효과음 ' +
+      (this.sensoryFeedback.soundEnabled ? 'ON' : 'OFF') +
+      '</span>'
+
+    const hapticsAvailable = this.sensoryFeedback.hapticsSupported
+    hapticsToggle.disabled = !hapticsAvailable
+    hapticsToggle.setAttribute(
+      'aria-pressed',
+      String(
+        hapticsAvailable && this.sensoryFeedback.hapticsEnabled,
+      ),
+    )
+    hapticsToggle.setAttribute(
+      'aria-label',
+      hapticsAvailable
+        ? `진동 ${this.sensoryFeedback.hapticsEnabled ? '끄기' : '켜기'}`
+        : '이 기기에서는 진동을 지원하지 않아요',
+    )
+    hapticsToggle.innerHTML =
+      '<span aria-hidden="true">≋</span><span>' +
+      (hapticsAvailable
+        ? '진동 ' + (this.sensoryFeedback.hapticsEnabled ? 'ON' : 'OFF')
+        : '진동 미지원') +
+      '</span>'
+  }
+
   private renderHome(invitedRoomCode: string | null = null): void {
     const isInviteMode = invitedRoomCode !== null
     const homeGeneration = ++this.viewGeneration
@@ -258,6 +390,46 @@ export class AppController {
             먹고 싶은 메뉴는 포획하고<br />
             나머지는 정확히 반으로 썰어보세요.
           </p>
+          <div
+            class="feedback-settings"
+            role="group"
+            aria-label="게임 피드백 설정"
+          >
+            <button
+              class="feedback-toggle"
+              type="button"
+              data-testid="sound-toggle"
+              aria-pressed="${this.sensoryFeedback.soundEnabled ? 'true' : 'false'}"
+              aria-label="효과음 ${this.sensoryFeedback.soundEnabled ? '끄기' : '켜기'}"
+            >
+              <span aria-hidden="true">♪</span>
+              <span>효과음 ${this.sensoryFeedback.soundEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+            <button
+              class="feedback-toggle"
+              type="button"
+              data-testid="haptics-toggle"
+              aria-pressed="${
+                this.sensoryFeedback.hapticsSupported &&
+                this.sensoryFeedback.hapticsEnabled
+                  ? 'true'
+                  : 'false'
+              }"
+              aria-label="${
+                this.sensoryFeedback.hapticsSupported
+                  ? `진동 ${this.sensoryFeedback.hapticsEnabled ? '끄기' : '켜기'}`
+                  : '이 기기에서는 진동을 지원하지 않아요'
+              }"
+              ${this.sensoryFeedback.hapticsSupported ? '' : 'disabled'}
+            >
+              <span aria-hidden="true">≋</span>
+              <span>${
+                this.sensoryFeedback.hapticsSupported
+                  ? `진동 ${this.sensoryFeedback.hapticsEnabled ? 'ON' : 'OFF'}`
+                  : '진동 미지원'
+              }</span>
+            </button>
+          </div>
         </header>
 
         <section class="setup-card" aria-labelledby="play-setup-title">
@@ -305,6 +477,25 @@ export class AppController {
             </button>
           </div>
         </section>
+
+        ${
+          isInviteMode
+            ? ''
+            : `
+              <details class="game-guide" data-testid="game-guide">
+                <summary>게임 방법</summary>
+                <div class="game-guide-content">
+                  <p><strong>드래그</strong>해서 음식을 반으로 썰어요.</p>
+                  <p><strong>0.3초 꾹</strong> 누르면 먹고 싶은 메뉴를 포획해요.</p>
+                  <ul>
+                    <li>포획은 한 판에 최대 2번까지 가능해요.</li>
+                    <li>놓친 음식은 0점으로 계산돼요.</li>
+                    <li>포획한 음식은 평균 점수에서 제외돼요.</li>
+                  </ul>
+                </div>
+              </details>
+            `
+        }
 
         <section class="join-card" aria-labelledby="join-title">
           <div>
@@ -370,6 +561,30 @@ export class AppController {
     const elements = this.getHomeElements()
     elements.nickname.value = this.readStoredNickname()
     elements.roomCode.value = invitedRoomCode ?? ''
+
+    this.query<HTMLButtonElement>('[data-testid="sound-toggle"]').addEventListener(
+      'click',
+      () => {
+        const enabled = !this.sensoryFeedback.soundEnabled
+        this.sensoryFeedback.setSoundEnabled(enabled)
+        this.updateHomeFeedbackControls()
+        if (enabled) {
+          void this.sensoryFeedback.unlock().then((unlocked) => {
+            if (unlocked) {
+              this.sensoryFeedback.trigger('ui-confirm')
+            }
+          })
+        }
+      },
+    )
+    this.query<HTMLButtonElement>(
+      '[data-testid="haptics-toggle"]',
+    ).addEventListener('click', () => {
+      this.sensoryFeedback.setHapticsEnabled(
+        !this.sensoryFeedback.hapticsEnabled,
+      )
+      this.updateHomeFeedbackControls()
+    })
 
     this.query<HTMLButtonElement>('[data-testid="solo-start"]').addEventListener(
       'click',
@@ -1303,7 +1518,15 @@ export class AppController {
       <div class="app-screen countdown-screen">
         <p class="eyebrow">ROOM ${room.code}</p>
         <p>명단이 잠겼습니다</p>
-        <strong data-testid="countdown">3</strong>
+        <strong
+          data-testid="countdown"
+          role="timer"
+          aria-live="polite"
+          aria-label="게임 시작까지 남은 시간"
+        >3</strong>
+        <span class="countdown-controls">
+          <b>드래그</b>해서 베기 · <b>0.3초 꾹</b> 눌러 포획
+        </span>
         <span>모두 같은 메뉴로 시작합니다</span>
       </div>
     `
@@ -1311,9 +1534,15 @@ export class AppController {
     const countdown = this.query<HTMLElement>(
       '[data-testid="countdown"]',
     )
+    let previousCountdownValue: number | null = null
     const updateCountdown = () => {
       const remaining = Math.max(0, room.start.startAt - Date.now())
-      countdown.textContent = String(Math.max(1, Math.ceil(remaining / 1_000)))
+      const nextValue = Math.max(1, Math.ceil(remaining / 1_000))
+      countdown.textContent = String(nextValue)
+      if (nextValue !== previousCountdownValue) {
+        previousCountdownValue = nextValue
+        this.sensoryFeedback.trigger('countdown', 0.7)
+      }
     }
     updateCountdown()
     this.countdownInterval = window.setInterval(updateCountdown, 100)
@@ -1330,6 +1559,7 @@ export class AppController {
         return
       }
       this.startGame(this.createRoomGameLaunchOptions(room))
+      this.sensoryFeedback.trigger('start', 0.72)
       this.scheduleRoomResultDeadline(room)
     }, delay)
   }
@@ -1638,6 +1868,7 @@ export class AppController {
     this.cleanupResultSubscription()
     this.clearRoomResultDeadline()
     this.renderRoomResultsSummary(flow.room, resolution.summary)
+    this.sensoryFeedback.trigger('results', 0.72)
   }
 
   private async handleRoomResultDeadline(

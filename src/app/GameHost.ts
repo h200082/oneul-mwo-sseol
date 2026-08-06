@@ -1,5 +1,9 @@
 import type Phaser from 'phaser'
 
+import {
+  NOOP_SENSORY_FEEDBACK,
+  type SensoryFeedback,
+} from '../feedback/SensoryFeedback'
 import { createGame } from '../game/createGame'
 import type {
   GameLaunchOptions,
@@ -19,6 +23,8 @@ export class GameHost {
     private readonly onReturnHome: () => void,
     private readonly onGameResult?: PlayerGameResultHandler,
     private readonly progressStore?: RoomGameProgressStore,
+    private readonly sensoryFeedback: SensoryFeedback =
+      NOOP_SENSORY_FEEDBACK,
   ) {}
 
   start(options: GameLaunchOptions): Phaser.Game {
@@ -30,6 +36,7 @@ export class GameHost {
       options,
       this.onGameResult,
       this.progressStore,
+      this.sensoryFeedback,
     )
     this.game = game
     game.events.once('return-home', this.onReturnHome)
@@ -43,6 +50,7 @@ export class GameHost {
   }
 
   stop(): void {
+    this.sensoryFeedback.stopAll()
     if (this.game) {
       this.game.destroy(true)
       this.game = null

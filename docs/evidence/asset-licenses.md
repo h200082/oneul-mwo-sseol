@@ -24,5 +24,6 @@
 |---|---|---|---|---|
 | `public/favicon.svg` | 직접 작성한 SVG 도형 | `ai-prompts/2026-07-27-core-prototype.md` | 브라우저 표시와 경로 검증 | 브라우저 파비콘 |
 | 프로토타입 도형·배경 | Phaser Graphics로 런타임 생성 | `ai-prompts/2026-07-27-core-prototype.md` | 모바일 가독성·색상·배치 조정 | 현재 게임 화면 |
+| 절차형 효과음·진동 패턴 | Web Audio Oscillator·Gain과 표준 Vibration API로 런타임 직접 생성 | `ai-prompts/2026-08-05-sensory-feedback.md` | 이벤트별 음높이·길이·gain과 진동 패턴을 직접 검토하고 방 모드 볼륨 축소 | 베기·포획·놓침·카운트다운·후반·결과 피드백 |
 | 방 초대 QR 이미지 | `qrcode`로 실행 중 PNG data URL 생성 | `ai-prompts/2026-07-27-room-lobby-prototype.md` | 실제 초대 URL·오류 대체 경로 검증 | 방 대기실 |
 | `src/assets/food/*.webp` 5종 | Codex 내장 ImageGen 생성 후 크로마키 제거·WebP 최적화 | `ai-prompts/2026-08-01-food-visual-slice.md` | 결과 선별, 하드 키 tolerance 45로 투명 배경 정리, 512×512 정규화, 모바일 용량 최적화 | 게임 토큰과 공동 결과 음식 카드 |

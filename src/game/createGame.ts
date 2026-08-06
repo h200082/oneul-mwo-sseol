@@ -1,5 +1,9 @@
 import Phaser from 'phaser'
 import {
+  NOOP_SENSORY_FEEDBACK,
+  type SensoryFeedback,
+} from '../feedback/SensoryFeedback'
+import {
   DEFAULT_GAME_LAUNCH_OPTIONS,
   type GameLaunchOptions,
   type PlayerGameResultHandler,
@@ -15,6 +19,7 @@ export function createGame(
   launchOptions: GameLaunchOptions = DEFAULT_GAME_LAUNCH_OPTIONS,
   onGameResult?: PlayerGameResultHandler,
   progressStore?: RoomGameProgressStore,
+  sensoryFeedback: SensoryFeedback = NOOP_SENSORY_FEEDBACK,
 ): Phaser.Game {
   return new Phaser.Game({
     type: Phaser.AUTO,
@@ -36,7 +41,12 @@ export function createGame(
       activePointers: 2,
     },
     scene: [
-      new PrototypeScene(launchOptions, onGameResult, progressStore),
+      new PrototypeScene(
+        launchOptions,
+        onGameResult,
+        progressStore,
+        sensoryFeedback,
+      ),
     ],
   })
 }

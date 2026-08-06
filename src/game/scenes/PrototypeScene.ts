@@ -1,4 +1,10 @@
 import Phaser from 'phaser'
+import {
+  NOOP_SENSORY_FEEDBACK,
+  type SensoryCue,
+  type SensoryFeedback,
+  type SensoryFeedbackDebugState,
+} from '../../feedback/SensoryFeedback'
 import { type Circle, type Point } from '../../domain/geometry'
 import {
   classifyGesture,
@@ -30,6 +36,11 @@ import {
   type PlayerGameResultHandler,
 } from '../gameTypes'
 import type { RoomGameProgressStore } from '../gameProgress'
+import {
+  getDisplayedSliceAccuracy,
+  getSliceFeedback,
+  type SliceFeedback,
+} from '../gameFeedback'
 
 const TOTAL_ROUNDS = 20
 const JUDGEMENT_RADIUS = 64
@@ -45,6 +56,18 @@ const TOKEN_VISUAL_MAX_WIDTH = 128
 const TOKEN_VISUAL_MAX_HEIGHT = 112
 const SLICE_EFFECT_DURATION_MS = 440
 const CAPTURE_EFFECT_DURATION_MS = 480
+const INTRO_AUTO_DISMISS_MS = 2_300
+const MISS_WARNING_DISTANCE = 128
+const FINAL_SPRINT_ROUND_INDEX = 15
+const FINAL_SPRINT_BANNER_MS = 760
+const HUD_SCORE_CENTER_X = 170
+const ACCURACY_POPUP_MIN_Y = 232
+const SLICE_SENSORY_CUE = Object.freeze({
+  'needs-practice': 'slice-low',
+  good: 'slice-good',
+  great: 'slice-great',
+  perfect: 'slice-perfect',
+} satisfies Record<SliceFeedback['level'], SensoryCue>)
 
 interface TokenVisual {
   readonly children: Phaser.GameObjects.GameObject[]
@@ -62,6 +85,7 @@ interface ActiveToken {
   readonly fallDurationMs: number
   readonly hasVisual: boolean
   readonly renderBounds: TokenVisual['renderBounds']
+  missWarningShown: boolean
 }
 
 interface HoldCaptureState {
@@ -93,6 +117,9 @@ export class PrototypeScene extends Phaser.Scene {
   private scoreText!: Phaser.GameObjects.Text
   private captureText!: Phaser.GameObjects.Text
   private feedbackText!: Phaser.GameObjects.Text
+  private missWarningLine: Phaser.GameObjects.Rectangle | null = null
+  private introOverlay: Phaser.GameObjects.Container | null = null
+  private introTimer: Phaser.Time.TimerEvent | null = null
   private activeToken: ActiveToken | null = null
   private holdCapture: HoldCaptureState | null = null
   private activeCaptureEffect: Phaser.GameObjects.Container | null = null
@@ -111,12 +138,16 @@ export class PrototypeScene extends Phaser.Scene {
   private isDrawing = false
   private isSlicing = false
   private isFinished = false
+  private missWarningActive = false
+  private finalSprintAnnounced = false
 
   constructor(
     private readonly launchOptions: GameLaunchOptions =
       DEFAULT_GAME_LAUNCH_OPTIONS,
     private readonly onGameResult?: PlayerGameResultHandler,
     private readonly progressStore?: RoomGameProgressStore,
+    private readonly sensoryFeedback: SensoryFeedback =
+      NOOP_SENSORY_FEEDBACK,
   ) {
     super('prototype')
   }
@@ -192,16 +223,25 @@ export class PrototypeScene extends Phaser.Scene {
     )
 
     this.updateHud()
-    this.time.delayedCall(500, () => this.spawnRound())
+    if (this.launchOptions.mode === 'solo' && this.rounds.length === 0) {
+      this.showIntroGuide()
+    } else {
+      this.time.delayedCall(500, () => this.spawnRound())
+    }
   }
 
   private resetRunState(): void {
     this.gestureTimeout?.remove(false)
     this.holdCapture?.tween.stop()
     this.holdCapture?.graphics.destroy()
+    this.introTimer?.remove(false)
+    this.introOverlay?.destroy(true)
     this.activeToken = null
     this.activeCaptureEffect = null
     this.holdCapture = null
+    this.introOverlay = null
+    this.introTimer = null
+    this.missWarningLine = null
     this.captureSlots = []
     this.filledCaptureSlotCount = 0
     this.lastSliceAngleDegrees = null
@@ -217,6 +257,8 @@ export class PrototypeScene extends Phaser.Scene {
     this.isDrawing = false
     this.isSlicing = false
     this.isFinished = false
+    this.missWarningActive = false
+    this.finalSprintAnnounced = false
   }
 
   getDebugState(): {
@@ -251,6 +293,10 @@ export class PrototypeScene extends Phaser.Scene {
     readonly mealTime: GameLaunchOptions['mealTime']
     readonly deckSeed: GameLaunchOptions['deckSeed']
     readonly deckMenuIds: readonly string[]
+    readonly introVisible: boolean
+    readonly missWarningActive: boolean
+    readonly finalSprintAnnounced: boolean
+    readonly sensoryFeedback: Readonly<SensoryFeedbackDebugState>
   } {
     return {
       activeToken: this.activeToken
@@ -292,6 +338,10 @@ export class PrototypeScene extends Phaser.Scene {
       mealTime: this.launchOptions.mealTime,
       deckSeed: this.launchOptions.deckSeed,
       deckMenuIds: this.deck.map((menu) => menu.id),
+      introVisible: this.introOverlay !== null,
+      missWarningActive: this.missWarningActive,
+      finalSprintAnnounced: this.finalSprintAnnounced,
+      sensoryFeedback: this.sensoryFeedback.getDebugState(),
     }
   }
 
@@ -336,6 +386,18 @@ export class PrototypeScene extends Phaser.Scene {
     background.lineTo(LOGICAL_WIDTH - 42, MISS_LINE_Y)
     background.strokePath()
 
+    this.missWarningLine = this.add
+      .rectangle(
+        LOGICAL_WIDTH / 2,
+        MISS_LINE_Y,
+        LOGICAL_WIDTH - 84,
+        5,
+        0xff795f,
+        1,
+      )
+      .setAlpha(0)
+      .setDepth(4)
+
     this.add
       .text(LOGICAL_WIDTH / 2, 44, '오늘 뭐 썰?', {
         color: '#fff8e7',
@@ -363,7 +425,7 @@ export class PrototypeScene extends Phaser.Scene {
     })
 
     this.scoreText = this.add
-      .text(LOGICAL_WIDTH / 2, 103, '', {
+      .text(HUD_SCORE_CENTER_X, 103, '', {
         color: '#55e6d1',
         fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
         fontSize: '16px',
@@ -408,6 +470,374 @@ export class PrototypeScene extends Phaser.Scene {
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
+
+    this.createSensoryControls()
+  }
+
+  private createSensoryControls(): void {
+    const hapticsSupported = this.sensoryFeedback.hapticsSupported
+    const soundX = hapticsSupported ? 317 : 365
+    const buttonY = 44
+
+    const createToggle = (
+      x: number,
+      label: string,
+      getEnabled: () => boolean,
+      onToggle: () => void,
+    ): (() => void) => {
+      const panel = this.add
+        .rectangle(x, buttonY, 44, 44, 0x1a2634, 0.94)
+        .setStrokeStyle(2, 0x52677d, 0.9)
+        .setDepth(14)
+        .setInteractive({ useHandCursor: true })
+      const copy = this.add
+        .text(x, buttonY, label, {
+          color: '#91a2b4',
+          fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+          fontSize: label.length > 1 ? '10px' : '21px',
+          fontStyle: 'bold',
+        })
+        .setOrigin(0.5)
+        .setDepth(15)
+
+      const sync = (): void => {
+        const enabled = getEnabled()
+        panel
+          .setFillStyle(enabled ? 0x1e4647 : 0x1a2634, 0.94)
+          .setStrokeStyle(2, enabled ? 0x55e6d1 : 0x52677d, 0.9)
+        copy.setColor(enabled ? '#7ef0df' : '#91a2b4')
+        panel.setAlpha(enabled ? 1 : 0.7)
+        copy.setAlpha(enabled ? 1 : 0.7)
+      }
+      const stopPropagation = (
+        _pointer: Phaser.Input.Pointer,
+        _localX: number,
+        _localY: number,
+        event: Phaser.Types.Input.EventData,
+      ): void => {
+        event.stopPropagation()
+      }
+      panel.on(Phaser.Input.Events.POINTER_DOWN, stopPropagation)
+      panel.on(
+        Phaser.Input.Events.POINTER_UP,
+        (
+          _pointer: Phaser.Input.Pointer,
+          _localX: number,
+          _localY: number,
+          event: Phaser.Types.Input.EventData,
+        ) => {
+          event.stopPropagation()
+          onToggle()
+          sync()
+        },
+      )
+      sync()
+      return sync
+    }
+
+    createToggle(
+      soundX,
+      '♪',
+      () => this.sensoryFeedback.soundEnabled,
+      () => {
+        const enabled = !this.sensoryFeedback.soundEnabled
+        this.sensoryFeedback.setSoundEnabled(enabled)
+        this.feedbackText
+          .setColor(enabled ? '#55e6d1' : '#b9c5d3')
+          .setText(`효과음 ${enabled ? '켜짐' : '꺼짐'}`)
+        if (enabled) {
+          void this.sensoryFeedback.unlock().then((unlocked) => {
+            if (unlocked) {
+              this.triggerSensory('ui-confirm')
+            }
+          })
+        }
+      },
+    )
+
+    if (hapticsSupported) {
+      createToggle(
+        365,
+        'VIB',
+        () => this.sensoryFeedback.hapticsEnabled,
+        () => {
+          const enabled = !this.sensoryFeedback.hapticsEnabled
+          this.sensoryFeedback.setHapticsEnabled(enabled)
+          this.feedbackText
+            .setColor(enabled ? '#55e6d1' : '#b9c5d3')
+            .setText(`진동 ${enabled ? '켜짐' : '꺼짐'}`)
+        },
+      )
+    }
+  }
+
+  private triggerSensory(cue: SensoryCue): void {
+    this.sensoryFeedback.trigger(
+      cue,
+      this.launchOptions.mode === 'room' ? 0.72 : 1,
+    )
+  }
+
+  private showIntroGuide(): void {
+    if (this.introOverlay || this.isFinished) {
+      return
+    }
+
+    this.feedbackText
+      .setColor('#fff8e7')
+      .setText('두 가지 조작만 기억하세요!')
+
+    const shade = this.add
+      .rectangle(
+        LOGICAL_WIDTH / 2,
+        LOGICAL_HEIGHT / 2,
+        LOGICAL_WIDTH,
+        LOGICAL_HEIGHT,
+        0x080d13,
+        0.72,
+      )
+      .setInteractive({ useHandCursor: true })
+    const panel = this.add
+      .rectangle(LOGICAL_WIDTH / 2, 418, 336, 420, 0x243244, 1)
+      .setStrokeStyle(3, 0xffd76a, 0.9)
+    const kicker = this.add
+      .text(LOGICAL_WIDTH / 2, 240, 'HOW TO PLAY', {
+        color: '#55e6d1',
+        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+        fontSize: '14px',
+        fontStyle: 'bold',
+        letterSpacing: 3,
+      })
+      .setOrigin(0.5)
+    const title = this.add
+      .text(LOGICAL_WIDTH / 2, 276, '썰거나, 포획하거나!', {
+        color: '#fff8e7',
+        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+        fontSize: '25px',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+    const sliceCard = this.add
+      .rectangle(LOGICAL_WIDTH / 2, 356, 286, 82, 0x17212d, 0.96)
+      .setStrokeStyle(2, 0x55e6d1, 0.72)
+    const sliceGuide = this.add
+      .text(
+        LOGICAL_WIDTH / 2,
+        356,
+        '드래그해서 반으로 썰기\n가운데를 지날수록 높은 점수',
+        {
+          align: 'center',
+          color: '#fff8e7',
+          fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+          fontSize: '17px',
+          fontStyle: 'bold',
+          lineSpacing: 7,
+        },
+      )
+      .setOrigin(0.5)
+    const captureCard = this.add
+      .rectangle(LOGICAL_WIDTH / 2, 465, 286, 82, 0x17212d, 0.96)
+      .setStrokeStyle(2, 0xffd76a, 0.72)
+    const captureGuide = this.add
+      .text(
+        LOGICAL_WIDTH / 2,
+        465,
+        '먹고 싶으면 0.3초 꾹\n포획은 최대 2회',
+        {
+          align: 'center',
+          color: '#fff8e7',
+          fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+          fontSize: '17px',
+          fontStyle: 'bold',
+          lineSpacing: 7,
+        },
+      )
+      .setOrigin(0.5)
+    const scoreRule = this.add
+      .text(
+        LOGICAL_WIDTH / 2,
+        535,
+        '놓치면 0점 · 포획 메뉴는 평균에서 제외',
+        {
+          color: '#c8d2df',
+          fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+          fontSize: '13px',
+        },
+      )
+      .setOrigin(0.5)
+    const skip = this.add
+      .text(LOGICAL_WIDTH / 2, 585, '화면을 누르면 바로 시작', {
+        color: '#ffd76a',
+        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+        fontSize: '15px',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+
+    const overlay = this.add
+      .container(0, 0, [
+        shade,
+        panel,
+        kicker,
+        title,
+        sliceCard,
+        sliceGuide,
+        captureCard,
+        captureGuide,
+        scoreRule,
+        skip,
+      ])
+      .setDepth(40)
+      .setAlpha(0)
+
+    this.introOverlay = overlay
+    shade.once(Phaser.Input.Events.POINTER_UP, () => {
+      this.dismissIntroGuide()
+    })
+    this.tweens.add({
+      targets: overlay,
+      alpha: 1,
+      duration: 160,
+      ease: 'Quad.Out',
+    })
+    this.introTimer = this.time.delayedCall(
+      INTRO_AUTO_DISMISS_MS,
+      () => this.dismissIntroGuide(),
+    )
+  }
+
+  private dismissIntroGuide(startRound = true): void {
+    const overlay = this.introOverlay
+    if (!overlay) {
+      return
+    }
+
+    this.introOverlay = null
+    this.introTimer?.remove(false)
+    this.introTimer = null
+
+    this.tweens.add({
+      targets: overlay,
+      alpha: 0,
+      duration: 140,
+      ease: 'Quad.Out',
+      onComplete: () => {
+        overlay.destroy(true)
+        if (startRound && !this.isFinished) {
+          this.time.delayedCall(80, () => this.spawnRound())
+        }
+      },
+    })
+  }
+
+  private announceFinalSprint(): void {
+    this.triggerSensory('final-five')
+    this.feedbackText
+      .setColor('#ffd76a')
+      .setText('마지막 5개 · 속도가 빨라져요!')
+
+    const panel = this.add
+      .rectangle(LOGICAL_WIDTH / 2, 252, 250, 92, 0x101821, 0.96)
+      .setStrokeStyle(3, 0xff795f, 0.95)
+    const title = this.add
+      .text(LOGICAL_WIDTH / 2, 238, 'FINAL 5', {
+        color: '#ffd76a',
+        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+        fontSize: '29px',
+        fontStyle: 'bold',
+        letterSpacing: 2,
+      })
+      .setOrigin(0.5)
+    const copy = this.add
+      .text(LOGICAL_WIDTH / 2, 274, '마지막 스퍼트!', {
+        color: '#fff8e7',
+        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+        fontSize: '15px',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+    const banner = this.add
+      .container(0, 0, [panel, title, copy])
+      .setDepth(28)
+      .setAlpha(0)
+      .setScale(0.84)
+
+    this.tweens.add({
+      targets: banner,
+      alpha: 1,
+      scale: 1,
+      duration: 180,
+      ease: 'Back.Out',
+    })
+    this.time.delayedCall(FINAL_SPRINT_BANNER_MS - 220, () => {
+      this.tweens.add({
+        targets: banner,
+        y: -24,
+        alpha: 0,
+        duration: 220,
+        ease: 'Quad.In',
+        onComplete: () => banner.destroy(true),
+      })
+    })
+    this.time.delayedCall(FINAL_SPRINT_BANNER_MS, () => this.spawnRound())
+  }
+
+  private startMissWarning(): void {
+    const line = this.missWarningLine
+    if (!line || this.missWarningActive) {
+      return
+    }
+
+    this.missWarningActive = true
+    this.tweens.killTweensOf(line)
+    line.setAlpha(0.95)
+    this.tweens.add({
+      targets: line,
+      alpha: 0.22,
+      duration: 140,
+      yoyo: true,
+      repeat: 2,
+      ease: 'Sine.InOut',
+      onComplete: () => {
+        if (this.missWarningActive) {
+          line.setAlpha(0.55)
+        }
+      },
+    })
+
+    if (!this.isDrawing) {
+      this.triggerSensory('miss-warning')
+      this.feedbackText
+        .setColor('#ff9b7c')
+        .setText('놓치기 직전! 지금 썰거나 포획하세요')
+    }
+  }
+
+  private clearMissWarning(): void {
+    const line = this.missWarningLine
+    this.missWarningActive = false
+    if (!line) {
+      return
+    }
+
+    this.tweens.killTweensOf(line)
+    line.setAlpha(0)
+  }
+
+  private getRoundInstruction(
+    menuName: string,
+    roundIndex: number,
+  ): string {
+    if (roundIndex === 0) {
+      return menuName + ' · 화면을 가로질러 드래그해 보세요!'
+    }
+    if (roundIndex === 1) {
+      return menuName + ' · 먹고 싶으면 움직이지 말고 0.3초 꾹!'
+    }
+    if (roundIndex === 2) {
+      return '포획은 선택 · ' + menuName + '을 정확히 반으로 썰어보세요'
+    }
+    return menuName + ' · 꾹 눌러 포획 · 드래그해 베기'
   }
 
   private spawnRound(): void {
@@ -418,6 +848,15 @@ export class PrototypeScene extends Phaser.Scene {
     const roundIndex = this.rounds.length
     if (roundIndex >= TOTAL_ROUNDS) {
       this.showResults()
+      return
+    }
+
+    if (
+      roundIndex === FINAL_SPRINT_ROUND_INDEX &&
+      !this.finalSprintAnnounced
+    ) {
+      this.finalSprintAnnounced = true
+      this.announceFinalSprint()
       return
     }
 
@@ -440,6 +879,17 @@ export class PrototypeScene extends Phaser.Scene {
       y: MISS_LINE_Y + JUDGEMENT_RADIUS,
       duration: fallDurationMs,
       ease: 'Linear',
+      onUpdate: () => {
+        const activeToken = this.activeToken
+        if (
+          activeToken?.container === container &&
+          !activeToken.missWarningShown &&
+          container.y >= MISS_LINE_Y - MISS_WARNING_DISTANCE
+        ) {
+          activeToken.missWarningShown = true
+          this.startMissWarning()
+        }
+      },
       onComplete: () => {
         if (this.activeToken?.container === container) {
           this.resolveRound({ type: 'miss' })
@@ -454,9 +904,12 @@ export class PrototypeScene extends Phaser.Scene {
       fallDurationMs,
       hasVisual: tokenVisual.hasVisual,
       renderBounds: tokenVisual.renderBounds,
+      missWarningShown: false,
     }
     this.feedbackText.setColor('#fff8e7')
-    this.feedbackText.setText(`${menu.nameKo} — 꾹 눌러 포획 · 드래그해 베기`)
+    this.feedbackText.setText(
+      this.getRoundInstruction(menu.nameKo, roundIndex),
+    )
     this.updateHud()
   }
 
@@ -795,8 +1248,14 @@ export class PrototypeScene extends Phaser.Scene {
   }
 
   private teardownInput(): void {
+    this.sensoryFeedback.stopAll()
     this.clearGestureTimeout()
     this.cancelHoldCapture()
+    this.introTimer?.remove(false)
+    this.introTimer = null
+    this.introOverlay?.destroy(true)
+    this.introOverlay = null
+    this.clearMissWarning()
     this.input.off(Phaser.Input.Events.POINTER_DOWN, this.handlePointerDown, this)
     this.input.off(Phaser.Input.Events.POINTER_MOVE, this.handlePointerMove, this)
     this.input.off(Phaser.Input.Events.POINTER_UP, this.handlePointerUp, this)
@@ -976,6 +1435,7 @@ export class PrototypeScene extends Phaser.Scene {
 
     this.activeToken = null
     token.tween.stop()
+    this.clearMissWarning()
 
     const roundIndex = this.rounds.length
     this.rounds.push({
@@ -988,18 +1448,43 @@ export class PrototypeScene extends Phaser.Scene {
     this.updateHud()
 
     if (action.type === 'capture') {
-      this.feedbackText.setText(`${token.menu.nameKo} 포획! ${this.filledCaptureSlotCount + 1}/${MAX_CAPTURES}`)
+      this.feedbackText
+        .setColor('#ffd76a')
+        .setText(
+          token.menu.nameKo +
+            ' 포획! ' +
+            (this.filledCaptureSlotCount + 1) +
+            '/' +
+            MAX_CAPTURES,
+        )
+      this.triggerSensory('capture')
       this.playCaptureResolution(token)
     } else if (action.type === 'slice') {
       if (!decision || decision.kind !== 'slice') {
         throw new Error('베기 연출에는 베기 제스처 결정이 필요합니다.')
       }
-      const roundedScore = Math.round(action.accuracy * 10) / 10
-      const rating = roundedScore >= 95 ? '칼각!' : '정확도'
-      this.feedbackText.setText(`${rating} ${roundedScore.toFixed(1)}%`)
-      this.playSliceResolution(token, decision, roundedScore)
+      const roundedScore = getDisplayedSliceAccuracy(action.accuracy)
+      const sliceFeedback = getSliceFeedback(action.accuracy)
+      this.triggerSensory(SLICE_SENSORY_CUE[sliceFeedback.level])
+      this.feedbackText
+        .setColor(sliceFeedback.cssColor)
+        .setText(
+          sliceFeedback.label + ' ' + roundedScore.toFixed(1) + '%',
+        )
+      this.playSliceResolution(
+        token,
+        decision,
+        roundedScore,
+        sliceFeedback,
+      )
     } else {
-      this.feedbackText.setText(`${token.menu.nameKo} 놓침 · 0점`)
+      this.triggerSensory('miss')
+      this.feedbackText
+        .setColor('#ff9b7c')
+        .setText(token.menu.nameKo + ' 놓침 · 0점')
+      this.showMissPopup(token.container.x, MISS_LINE_Y - 18)
+      this.cameras.main.flash(120, 255, 86, 72, false)
+      this.cameras.main.shake(80, 0.0025)
       this.tweens.add({
         targets: token.container,
         alpha: 0,
@@ -1143,6 +1628,7 @@ export class PrototypeScene extends Phaser.Scene {
     token: ActiveToken,
     decision: SliceGestureDecision,
     roundedScore: number,
+    feedback: Readonly<SliceFeedback>,
   ): void {
     const { entryPoint, exitPoint } = decision.chord
     const deltaX = exitPoint.x - entryPoint.x
@@ -1189,6 +1675,7 @@ export class PrototypeScene extends Phaser.Scene {
       (entryPoint.x + exitPoint.x) / 2,
       (entryPoint.y + exitPoint.y) / 2,
       roundedScore,
+      feedback,
     )
     this.cameras.main.shake(85, 0.0035)
 
@@ -1348,13 +1835,52 @@ export class PrototypeScene extends Phaser.Scene {
     })
   }
 
-  private showAccuracyPopup(x: number, y: number, score: number): void {
+  private showAccuracyPopup(
+    x: number,
+    y: number,
+    score: number,
+    feedback: Readonly<SliceFeedback>,
+  ): void {
+    const popupStartY = Math.max(y - 26, ACCURACY_POPUP_MIN_Y)
     const popup = this.add
-      .text(x, y - 18, `${score.toFixed(1)}%`, {
-        color: score >= 95 ? '#ffd76a' : '#fff8e7',
+      .text(
+        x,
+        popupStartY,
+        feedback.label + '\n' + score.toFixed(1) + '%',
+        {
+          align: 'center',
+          color: feedback.cssColor,
+          fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+          fontSize: '27px',
+          fontStyle: 'bold',
+          lineSpacing: 2,
+          stroke: '#101821',
+          strokeThickness: 6,
+        },
+      )
+      .setOrigin(0.5)
+      .setDepth(25)
+
+    this.tweens.add({
+      targets: popup,
+      y: popup.y - 50,
+      scale: feedback.level === 'perfect' ? 1.12 : 1,
+      alpha: 0,
+      duration: 700,
+      ease: 'Cubic.Out',
+      onComplete: () => popup.destroy(),
+    })
+  }
+
+  private showMissPopup(x: number, y: number): void {
+    const popup = this.add
+      .text(x, y, 'MISS\n0점', {
+        align: 'center',
+        color: '#ff795f',
         fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
-        fontSize: '30px',
+        fontSize: '28px',
         fontStyle: 'bold',
+        lineSpacing: 2,
         stroke: '#101821',
         strokeThickness: 6,
       })
@@ -1363,9 +1889,9 @@ export class PrototypeScene extends Phaser.Scene {
 
     this.tweens.add({
       targets: popup,
-      y: popup.y - 48,
+      y: popup.y - 42,
       alpha: 0,
-      duration: 650,
+      duration: 560,
       ease: 'Cubic.Out',
       onComplete: () => popup.destroy(),
     })
@@ -1391,12 +1917,19 @@ export class PrototypeScene extends Phaser.Scene {
     this.progressText.setText(
       `${Math.min(completed + 1, TOTAL_ROUNDS)}/${TOTAL_ROUNDS}`,
     )
-    this.scoreText.setText(`평균 ${average.toFixed(1)}`)
+    this.scoreText.setText(
+      nonCaptured.length > 0
+        ? '현재 평균 ' + average.toFixed(1)
+        : '현재 평균 —',
+    )
     this.captureText.setText(`포획 ${captures}/${MAX_CAPTURES}`)
   }
 
   private showResults(): void {
     this.isFinished = true
+    if (this.launchOptions.mode === 'solo') {
+      this.triggerSensory('results')
+    }
     this.progressText.setText(`${TOTAL_ROUNDS}/${TOTAL_ROUNDS}`)
 
     const summary = calculatePlayerScore(this.rounds)

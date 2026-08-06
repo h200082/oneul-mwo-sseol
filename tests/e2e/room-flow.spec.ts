@@ -20,6 +20,10 @@ interface RoomGameDebugState {
 }
 
 interface AppResultDebugState {
+  readonly sensoryFeedback: {
+    readonly lastCue: string | null
+    readonly triggerCount: number
+  }
   readonly submitRoomResultForTest: (input: {
     readonly score: number
     readonly capturedMenuIds: readonly string[]
@@ -52,6 +56,19 @@ async function readRoomGameDebugState(
     }
 
     return scene.getDebugState()
+  })
+}
+
+async function readAppSensoryDebugState(
+  page: Page,
+): Promise<AppResultDebugState['sensoryFeedback']> {
+  return page.evaluate(() => {
+    const app = (window as GameDebugWindow).__NHN_APP__
+    if (!app) {
+      throw new Error('앱 디버그 인터페이스를 찾을 수 없습니다.')
+    }
+
+    return app.getDebugState().sensoryFeedback
   })
 }
 
@@ -144,8 +161,17 @@ test('방장은 두 번째 참가자가 들어오면 준비 버튼 없이 시작
   await expect(page.getByTestId('start-room')).toHaveText('2명으로 시작')
 
   await page.getByTestId('start-room').click()
-  await expect(page.getByTestId('countdown')).toBeVisible()
-  await expect(participantPage.getByTestId('countdown')).toBeVisible()
+  const hostCountdown = page.getByTestId('countdown')
+  const participantCountdown = participantPage.getByTestId('countdown')
+  await expect(hostCountdown).toBeVisible()
+  await expect(participantCountdown).toBeVisible()
+  await expect(hostCountdown).toHaveAttribute('role', 'timer')
+  await expect(hostCountdown).toHaveAccessibleName(
+    '게임 시작까지 남은 시간',
+  )
+  await expect(participantCountdown).toHaveAccessibleName(
+    '게임 시작까지 남은 시간',
+  )
 
   await expect(page.locator('#game-root canvas')).toBeVisible({
     timeout: GAME_CANVAS_TIMEOUT_MS,
@@ -235,6 +261,7 @@ test('두 탭의 결과를 기다렸다가 같은 순위와 겹침 메뉴를 공
     timeout: GAME_CANVAS_TIMEOUT_MS,
   })
 
+  const hostSensoryBeforeResult = await readAppSensoryDebugState(page)
   await submitRoomResultForTest(page, {
     score: 95,
     capturedMenuIds: ['pizza', 'pasta'],
@@ -245,6 +272,8 @@ test('두 탭의 결과를 기다렸다가 같은 순위와 겹침 메뉴를 공
   await expect(page.getByTestId('room-results-waiting')).toBeVisible()
   await expect(page.getByTestId('result-progress')).toHaveText('1/2')
 
+  const participantSensoryBeforeResult =
+    await readAppSensoryDebugState(participantPage)
   await submitRoomResultForTest(participantPage, {
     score: 70,
     capturedMenuIds: ['pizza'],
@@ -255,6 +284,28 @@ test('두 탭의 결과를 기다렸다가 같은 순위와 겹침 메뉴를 공
   await expect(
     participantPage.getByTestId('room-results-summary'),
   ).toBeVisible()
+
+  await expect
+    .poll(async () => {
+      const sensory = await readAppSensoryDebugState(page)
+      return {
+        lastCue: sensory.lastCue,
+        triggerDelta:
+          sensory.triggerCount - hostSensoryBeforeResult.triggerCount,
+      }
+    })
+    .toEqual({ lastCue: 'results', triggerDelta: 1 })
+  await expect
+    .poll(async () => {
+      const sensory = await readAppSensoryDebugState(participantPage)
+      return {
+        lastCue: sensory.lastCue,
+        triggerDelta:
+          sensory.triggerCount -
+          participantSensoryBeforeResult.triggerCount,
+      }
+    })
+    .toEqual({ lastCue: 'results', triggerDelta: 1 })
 
   const standings = page.getByTestId('result-standing')
   await expect(standings).toHaveCount(2)
