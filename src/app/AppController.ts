@@ -49,6 +49,8 @@ const CONTENT_VERSION = 'menus-v1'
 const ROOM_COUNTDOWN_MS = 3_000
 const RESULT_COUNTDOWN_REFRESH_MS = 1_000
 const RESULT_FINALIZATION_RETRY_MS = 2_000
+const ROOM_SYNC_WATCHDOG_MS = 5_000
+const ROOM_SYNC_RETRY_DELAYS_MS = [500, 1_500, 3_000] as const
 
 const MENU_BY_ID = new Map(MENU_CATALOG.map((menu) => [menu.id, menu]))
 
@@ -71,11 +73,26 @@ export interface AppDebugRoomResultInput {
   readonly completedAt?: number
 }
 
+export type RoomSyncPhase =
+  | 'idle'
+  | 'connecting'
+  | 'live'
+  | 'recovering'
+  | 'failed'
+
+export interface AppDebugRoomSyncState {
+  readonly phase: RoomSyncPhase
+  readonly lastSyncedAt: number | null
+  readonly retryCount: number
+  readonly errorCode: string | null
+}
+
 export interface AppDebugState {
   readonly playerId: string
   readonly backend: AppBackend
   readonly roomCode: string | null
   readonly room: Room | null
+  readonly roomSync: Readonly<AppDebugRoomSyncState>
   readonly gameVisible: boolean
   readonly startSoloGameForTest: (
     deckSeed: GameLaunchOptions['deckSeed'],
@@ -113,6 +130,17 @@ export class AppController {
   private resultDeadlineInterval: number | null = null
   private currentRoom: Room | null = null
   private scheduledRoomKey: string | null = null
+  private roomStartPending = false
+  private roomSyncPhase: RoomSyncPhase = 'idle'
+  private roomSyncLastEventAt: number | null = null
+  private roomSyncRetryCount = 0
+  private roomSyncErrorCode: string | null = null
+  private roomSyncConnectionToken = 0
+  private roomSyncWatchdogTimeout: number | null = null
+  private roomSyncRetryTimeout: number | null = null
+  private roomSyncRefreshTask: Promise<void> | null = null
+  private lobbyVisibilityHandler: (() => void) | null = null
+  private lobbyOnlineHandler: (() => void) | null = null
   private scannerAbortController: AbortController | null = null
   private viewGeneration = 0
   private homeActionPending = false
@@ -171,6 +199,12 @@ export class AppController {
       backend: this.backend,
       roomCode: this.currentRoom?.code ?? null,
       room: this.currentRoom,
+      roomSync: Object.freeze({
+        phase: this.roomSyncPhase,
+        lastSyncedAt: this.roomSyncLastEventAt,
+        retryCount: this.roomSyncRetryCount,
+        errorCode: this.roomSyncErrorCode,
+      }),
       gameVisible: !this.gameRoot.hidden,
       startSoloGameForTest: (deckSeed) => {
         if (!import.meta.env.DEV) {
@@ -587,9 +621,14 @@ export class AppController {
   }
 
   private async renderLobby(initialRoom: WaitingRoom): Promise<void> {
+    this.assertLobbyRoomIdentity(initialRoom, initialRoom.code)
     this.cleanupRoomFlow()
     const generation = ++this.viewGeneration
     this.currentRoom = initialRoom
+    this.roomSyncPhase = 'live'
+    this.roomSyncLastEventAt = Date.now()
+    this.roomSyncRetryCount = 0
+    this.roomSyncErrorCode = null
     const lobbyUrl = new URL(window.location.href)
     lobbyUrl.searchParams.set('room', initialRoom.code)
     window.history.replaceState({}, '', lobbyUrl)
@@ -616,8 +655,9 @@ export class AppController {
         </header>
 
         <section class="invite-card">
-          <div class="qr-frame">
-            <img data-testid="room-qr" alt="방 초대 QR 코드" />
+          <div class="qr-frame" data-testid="room-qr-frame" data-state="loading">
+            <img data-testid="room-qr" alt="방 초대 QR 코드" hidden />
+            <span data-testid="room-qr-status">QR 준비 중</span>
           </div>
           <div class="invite-copy">
             <span>방 코드</span>
@@ -642,6 +682,12 @@ export class AppController {
         <div class="lobby-footer">
           <p role="status" data-testid="lobby-status"></p>
           <button
+            class="button button-ghost lobby-sync-retry"
+            type="button"
+            data-testid="retry-room-sync"
+            hidden
+          >다시 동기화</button>
+          <button
             class="button button-accent"
             type="button"
             data-testid="start-room"
@@ -655,27 +701,8 @@ export class AppController {
       window.location.href,
       initialRoom.code,
     )
-    const roomCodeElement = this.query<HTMLElement>(
-      '[data-testid="room-code"]',
-    )
-    roomCodeElement.textContent = initialRoom.code
-
-    const qrImage = this.query<HTMLImageElement>(
-      '[data-testid="room-qr"]',
-    )
-    const qrDataUrl = await QRCode.toDataURL(inviteUrl, {
-      width: 220,
-      margin: 2,
-      errorCorrectionLevel: 'M',
-      color: {
-        dark: '#101821',
-        light: '#fff8e7',
-      },
-    })
-    if (generation !== this.viewGeneration) {
-      return
-    }
-    qrImage.src = qrDataUrl
+    this.query<HTMLElement>('[data-testid="room-code"]').textContent =
+      initialRoom.code
 
     this.query<HTMLButtonElement>('[data-testid="leave-room"]').addEventListener(
       'click',
@@ -698,42 +725,343 @@ export class AppController {
         void this.startCurrentRoom()
       },
     )
+    this.query<HTMLButtonElement>(
+      '[data-testid="retry-room-sync"]',
+    ).addEventListener('click', () => {
+      if (!this.isActiveLobby(initialRoom.code, generation)) {
+        return
+      }
+      this.roomSyncRetryCount = 0
+      this.roomSyncErrorCode = null
+      this.requestLobbyRefresh(initialRoom.code, generation, 'manual')
+    })
 
     this.updateLobby(initialRoom)
-    const unsubscribe = await this.roomGateway.subscribe(
-      initialRoom.code,
-      (room) => {
-        if (generation !== this.viewGeneration) {
-          return
-        }
-        if (!room) {
-          this.showLobbyError('방을 찾을 수 없습니다.')
-          return
-        }
-        this.updateLobby(room)
-      },
-      (error) => {
-        if (generation !== this.viewGeneration) {
-          return
-        }
-        this.showLobbyError(
-          `방 동기화 오류: ${toUserMessage(error)}`,
-        )
-      },
-    )
-    if (generation !== this.viewGeneration) {
-      unsubscribe()
-      return
-    }
-    this.unsubscribeRoom = unsubscribe
+    this.setupLobbyRecoveryTriggers(initialRoom.code, generation)
+    void this.startLobbySubscription(initialRoom.code, generation, true)
+    void this.renderLobbyQr(inviteUrl, initialRoom.code, generation)
   }
 
-  private updateLobby(room: Room): void {
-    this.currentRoom = room
+  private async renderLobbyQr(
+    inviteUrl: string,
+    roomCode: string,
+    generation: number,
+  ): Promise<void> {
+    try {
+      const qrDataUrl = await QRCode.toDataURL(inviteUrl, {
+        width: 220,
+        margin: 2,
+        errorCorrectionLevel: 'M',
+        color: {
+          dark: '#101821',
+          light: '#fff8e7',
+        },
+      })
+      if (!this.isActiveLobby(roomCode, generation)) {
+        return
+      }
 
+      const qrImage = this.screenRoot.querySelector<HTMLImageElement>(
+        '[data-testid="room-qr"]',
+      )
+      const qrStatus = this.screenRoot.querySelector<HTMLElement>(
+        '[data-testid="room-qr-status"]',
+      )
+      const qrFrame = this.screenRoot.querySelector<HTMLElement>(
+        '[data-testid="room-qr-frame"]',
+      )
+      if (!qrImage || !qrStatus || !qrFrame) {
+        return
+      }
+
+      qrImage.src = qrDataUrl
+      qrImage.hidden = false
+      qrStatus.hidden = true
+      qrFrame.dataset.state = 'ready'
+    } catch {
+      if (!this.isActiveLobby(roomCode, generation)) {
+        return
+      }
+
+      const qrStatus = this.screenRoot.querySelector<HTMLElement>(
+        '[data-testid="room-qr-status"]',
+      )
+      const qrFrame = this.screenRoot.querySelector<HTMLElement>(
+        '[data-testid="room-qr-frame"]',
+      )
+      if (qrStatus && qrFrame) {
+        qrStatus.textContent = 'QR을 만들지 못했어요. 링크나 방 코드를 사용하세요.'
+        qrFrame.dataset.state = 'error'
+      }
+      this.logRoomSync('qr-generation-failed', roomCode)
+    }
+  }
+
+  private async startLobbySubscription(
+    roomCode: string,
+    generation: number,
+    serverStateConfirmed = false,
+  ): Promise<void> {
+    if (!this.isActiveLobby(roomCode, generation)) {
+      return
+    }
+
+    this.dropRoomSubscription()
+    const connectionToken = this.roomSyncConnectionToken
+    if (!serverStateConfirmed) {
+      this.roomSyncPhase = 'connecting'
+      this.roomSyncErrorCode = null
+      this.renderLobbySyncUi()
+    }
+    this.armLobbySyncWatchdog(roomCode, generation, connectionToken)
+    this.logRoomSync('subscription-started', roomCode)
+
+    try {
+      const unsubscribe = await this.roomGateway.subscribe(
+        roomCode,
+        (room) => {
+          this.handleLobbySnapshot(
+            room,
+            roomCode,
+            generation,
+            connectionToken,
+          )
+        },
+        () => {
+          this.handleLobbySubscriptionFailure(
+            roomCode,
+            generation,
+            connectionToken,
+            'SYNC-002',
+          )
+        },
+      )
+      if (
+        !this.isActiveLobby(roomCode, generation) ||
+        connectionToken !== this.roomSyncConnectionToken
+      ) {
+        unsubscribe()
+        return
+      }
+      this.unsubscribeRoom = unsubscribe
+    } catch {
+      this.handleLobbySubscriptionFailure(
+        roomCode,
+        generation,
+        connectionToken,
+        'SYNC-002',
+      )
+    }
+  }
+
+  private handleLobbySnapshot(
+    room: Room | null,
+    roomCode: string,
+    generation: number,
+    connectionToken: number,
+  ): void {
+    if (
+      !this.isActiveLobby(roomCode, generation) ||
+      connectionToken !== this.roomSyncConnectionToken
+    ) {
+      return
+    }
+    if (!room) {
+      this.scheduleLobbyRecovery(roomCode, generation, 'SYNC-003')
+      return
+    }
+
+    try {
+      this.assertLobbyRoomIdentity(room, roomCode)
+    } catch {
+      this.scheduleLobbyRecovery(roomCode, generation, 'SYNC-004')
+      return
+    }
+    if (!this.shouldAcceptRoomSnapshot(room)) {
+      this.logRoomSync('stale-snapshot-ignored', roomCode, room)
+      return
+    }
+
+    this.clearRoomSyncWatchdog()
+    this.clearRoomSyncRetryTimeout()
+    this.roomSyncPhase = 'live'
+    this.roomSyncLastEventAt = Date.now()
+    this.roomSyncRetryCount = 0
+    this.roomSyncErrorCode = null
+    this.logRoomSync('server-snapshot-accepted', roomCode, room)
+    this.updateLobby(room)
+  }
+
+  private handleLobbySubscriptionFailure(
+    roomCode: string,
+    generation: number,
+    connectionToken: number,
+    errorCode: string,
+  ): void {
+    if (
+      !this.isActiveLobby(roomCode, generation) ||
+      connectionToken !== this.roomSyncConnectionToken
+    ) {
+      return
+    }
+    this.scheduleLobbyRecovery(roomCode, generation, errorCode)
+  }
+
+  private armLobbySyncWatchdog(
+    roomCode: string,
+    generation: number,
+    connectionToken: number,
+  ): void {
+    this.clearRoomSyncWatchdog()
+    this.roomSyncWatchdogTimeout = window.setTimeout(() => {
+      this.roomSyncWatchdogTimeout = null
+      this.handleLobbySubscriptionFailure(
+        roomCode,
+        generation,
+        connectionToken,
+        'SYNC-001',
+      )
+    }, ROOM_SYNC_WATCHDOG_MS)
+  }
+
+  private scheduleLobbyRecovery(
+    roomCode: string,
+    generation: number,
+    errorCode: string,
+  ): void {
+    if (!this.isActiveLobby(roomCode, generation)) {
+      return
+    }
+
+    this.dropRoomSubscription()
+    this.clearRoomSyncRetryTimeout()
+    if (this.roomSyncRetryCount >= ROOM_SYNC_RETRY_DELAYS_MS.length) {
+      this.roomSyncPhase = 'failed'
+      this.roomSyncErrorCode = errorCode
+      this.renderLobbySyncUi()
+      this.logRoomSync('recovery-exhausted', roomCode)
+      return
+    }
+
+    const delay = ROOM_SYNC_RETRY_DELAYS_MS[this.roomSyncRetryCount]!
+    this.roomSyncRetryCount += 1
+    this.roomSyncPhase = 'recovering'
+    this.roomSyncErrorCode = errorCode
+    this.renderLobbySyncUi()
+    this.logRoomSync('recovery-scheduled', roomCode)
+    this.roomSyncRetryTimeout = window.setTimeout(() => {
+      this.roomSyncRetryTimeout = null
+      this.requestLobbyRefresh(roomCode, generation, 'retry')
+    }, delay)
+  }
+
+  private requestLobbyRefresh(
+    roomCode: string,
+    generation: number,
+    reason: 'retry' | 'manual' | 'visible' | 'online',
+  ): void {
+    if (
+      !this.isActiveLobby(roomCode, generation) ||
+      this.roomSyncRefreshTask
+    ) {
+      return
+    }
+
+    const task = this.performLobbyRefresh(roomCode, generation, reason)
+    this.roomSyncRefreshTask = task
+    void task.finally(() => {
+      if (this.roomSyncRefreshTask === task) {
+        this.roomSyncRefreshTask = null
+      }
+    })
+  }
+
+  private async performLobbyRefresh(
+    roomCode: string,
+    generation: number,
+    reason: 'retry' | 'manual' | 'visible' | 'online',
+  ): Promise<void> {
+    if (!this.isActiveLobby(roomCode, generation)) {
+      return
+    }
+
+    this.dropRoomSubscription()
+    this.clearRoomSyncRetryTimeout()
+    this.roomSyncPhase = 'connecting'
+    this.roomSyncErrorCode = null
+    this.renderLobbySyncUi()
+    this.logRoomSync(`refresh-${reason}`, roomCode)
+
+    try {
+      const room = await this.roomGateway.get(roomCode)
+      if (!this.isActiveLobby(roomCode, generation)) {
+        return
+      }
+      if (!room) {
+        this.scheduleLobbyRecovery(roomCode, generation, 'SYNC-003')
+        return
+      }
+      this.assertLobbyRoomIdentity(room, roomCode)
+      if (!this.shouldAcceptRoomSnapshot(room)) {
+        this.logRoomSync('stale-refresh-ignored', roomCode, room)
+        return
+      }
+
+      this.roomSyncPhase = 'live'
+      this.roomSyncLastEventAt = Date.now()
+      this.roomSyncErrorCode = null
+      this.logRoomSync('refresh-accepted', roomCode, room)
+      this.updateLobby(room)
+      if (room.status === 'waiting') {
+        void this.startLobbySubscription(roomCode, generation, true)
+      }
+    } catch {
+      if (this.isActiveLobby(roomCode, generation)) {
+        this.scheduleLobbyRecovery(roomCode, generation, 'SYNC-005')
+      }
+    }
+  }
+
+  private setupLobbyRecoveryTriggers(
+    roomCode: string,
+    generation: number,
+  ): void {
+    this.cleanupLobbyRecoveryTriggers()
+    this.lobbyVisibilityHandler = () => {
+      if (document.visibilityState !== 'visible') {
+        return
+      }
+      if (this.roomSyncPhase === 'failed') {
+        this.roomSyncRetryCount = 0
+      }
+      this.requestLobbyRefresh(roomCode, generation, 'visible')
+    }
+    this.lobbyOnlineHandler = () => {
+      if (this.roomSyncPhase === 'failed') {
+        this.roomSyncRetryCount = 0
+      }
+      this.requestLobbyRefresh(roomCode, generation, 'online')
+    }
+    document.addEventListener('visibilitychange', this.lobbyVisibilityHandler)
+    window.addEventListener('online', this.lobbyOnlineHandler)
+  }
+
+  private updateLobby(room: Room): boolean {
+    if (!this.shouldAcceptRoomSnapshot(room)) {
+      this.logRoomSync('state-regression-ignored', room.code, room)
+      return false
+    }
+    if (
+      room.status === 'waiting' &&
+      !this.screenRoot.querySelector('.lobby-screen')
+    ) {
+      return false
+    }
+
+    this.currentRoom = room
     if (room.status === 'started') {
       this.scheduleRoomGame(room)
-      return
+      return true
     }
 
     const playerCount = this.query<HTMLElement>(
@@ -765,44 +1093,198 @@ export class AppController {
       }),
     )
 
-    const isHost = room.hostPlayerId === this.playerId
-    const startButton = this.query<HTMLButtonElement>(
-      '[data-testid="start-room"]',
-    )
-    const lobbyStatus = this.query<HTMLElement>(
-      '[data-testid="lobby-status"]',
-    )
-
-    startButton.hidden = !isHost
-    startButton.disabled = !canStartRoom(room, this.playerId)
-    startButton.textContent = startButton.disabled
-      ? '2명부터 시작할 수 있어요'
-      : `${room.players.length}명으로 시작`
-    lobbyStatus.textContent = isHost
-      ? '참가자가 들어오면 준비 확인 없이 바로 시작할 수 있어요.'
-      : '방장이 시작하면 자동으로 카운트다운이 시작됩니다.'
+    this.renderLobbySyncUi()
+    return true
   }
 
-  private async startCurrentRoom(): Promise<void> {
+  private renderLobbySyncUi(): void {
     const room = this.currentRoom
     if (!room || room.status !== 'waiting') {
       return
     }
 
+    const startButton = this.screenRoot.querySelector<HTMLButtonElement>(
+      '[data-testid="start-room"]',
+    )
+    const lobbyStatus = this.screenRoot.querySelector<HTMLElement>(
+      '[data-testid="lobby-status"]',
+    )
+    const retryButton = this.screenRoot.querySelector<HTMLButtonElement>(
+      '[data-testid="retry-room-sync"]',
+    )
+    if (!startButton || !lobbyStatus || !retryButton) {
+      return
+    }
+
+    const isHost = room.hostPlayerId === this.playerId
+    startButton.hidden = !isHost
+    startButton.disabled =
+      this.roomStartPending ||
+      this.roomSyncPhase !== 'live' ||
+      !canStartRoom(room, this.playerId)
+    startButton.textContent = this.roomStartPending
+      ? '게임을 시작하고 있어요'
+      : canStartRoom(room, this.playerId)
+        ? `${room.players.length}명으로 시작`
+        : '2명부터 시작할 수 있어요'
+
+    let message: string
+    switch (this.roomSyncPhase) {
+      case 'live':
+        message = isHost
+          ? '참가자가 들어오면 준비 확인 없이 바로 시작할 수 있어요.'
+          : '방장이 시작하면 자동으로 카운트다운이 시작됩니다.'
+        break
+      case 'recovering':
+        message = `방 연결을 다시 확인하고 있어요 (${this.roomSyncRetryCount}/${ROOM_SYNC_RETRY_DELAYS_MS.length}).`
+        break
+      case 'failed':
+        message = `[${this.roomSyncErrorCode ?? 'SYNC-000'}] 방 연결을 확인하지 못했어요. 다시 동기화해 주세요.`
+        break
+      case 'idle':
+      case 'connecting':
+        message = '방 동기화 확인 중...'
+        break
+    }
+
+    if (lobbyStatus.textContent !== message) {
+      lobbyStatus.textContent = message
+    }
+    lobbyStatus.dataset.syncPhase = this.roomSyncPhase
+    retryButton.hidden = this.roomSyncPhase !== 'failed'
+  }
+
+  private shouldAcceptRoomSnapshot(room: Room): boolean {
+    const currentRoom = this.currentRoom
+    if (!currentRoom || currentRoom.code !== room.code) {
+      return true
+    }
+    if (currentRoom.status === 'started' && room.status === 'waiting') {
+      return false
+    }
+    if (
+      currentRoom.status === 'started' &&
+      room.status === 'started' &&
+      !sameRoomStart(currentRoom, room)
+    ) {
+      this.roomSyncErrorCode = 'SYNC-006'
+      this.logRoomSync('conflicting-start-ignored', room.code, room)
+      return false
+    }
+    return true
+  }
+
+  private assertLobbyRoomIdentity(room: Room, expectedCode: string): void {
+    if (room.code !== normalizeRoomCode(expectedCode)) {
+      throw new Error('방 코드가 현재 초대와 일치하지 않습니다.')
+    }
+    const host = room.players.find(
+      (player) => player.playerId === room.hostPlayerId,
+    )
+    if (!host || host.role !== 'host') {
+      throw new Error('방장 정보가 올바르지 않습니다.')
+    }
+    if (!room.players.some((player) => player.playerId === this.playerId)) {
+      throw new Error('현재 참가자 정보가 방 명단에 없습니다.')
+    }
+    if (
+      room.status === 'started' &&
+      (!room.start.roster.some(
+        (player) => player.playerId === this.playerId,
+      ) ||
+        !room.start.roster.some(
+          (player) => player.playerId === room.hostPlayerId,
+        ))
+    ) {
+      throw new Error('잠긴 게임 명단이 방 참가자 정보와 일치하지 않습니다.')
+    }
+  }
+
+  private isActiveLobby(roomCode: string, generation: number): boolean {
+    return (
+      generation === this.viewGeneration &&
+      this.currentRoom?.code === roomCode &&
+      this.currentRoom.status === 'waiting' &&
+      this.screenRoot.querySelector('.lobby-screen') !== null
+    )
+  }
+
+  private logRoomSync(
+    event: string,
+    roomCode: string,
+    room: Room | null = this.currentRoom,
+  ): void {
+    console.info('[room-sync]', {
+      event,
+      roomCode,
+      phase: this.roomSyncPhase,
+      roomStatus: room?.status ?? null,
+      playerCount: room?.players.length ?? null,
+      retryCount: this.roomSyncRetryCount,
+      errorCode: this.roomSyncErrorCode,
+      at: new Date().toISOString(),
+    })
+  }
+
+  private async startCurrentRoom(): Promise<void> {
+    const room = this.currentRoom
+    if (
+      !room ||
+      room.status !== 'waiting' ||
+      this.roomStartPending ||
+      this.roomSyncPhase !== 'live'
+    ) {
+      return
+    }
+
+    const generation = this.viewGeneration
+    let startError: string | null = null
+    this.roomStartPending = true
+    this.renderLobbySyncUi()
     try {
-      await this.roomGateway.start(room.code, {
+      const startedRoom = await this.roomGateway.start(room.code, {
         requesterPlayerId: this.playerId,
         deckSeed: createDeckSeed(room.code),
         contentVersion: CONTENT_VERSION,
         startAt: Date.now() + ROOM_COUNTDOWN_MS,
       })
+      if (
+        generation !== this.viewGeneration ||
+        this.currentRoom?.code !== room.code
+      ) {
+        return
+      }
+      this.assertLobbyRoomIdentity(startedRoom, room.code)
+      if (!this.shouldAcceptRoomSnapshot(startedRoom)) {
+        return
+      }
+      if (
+        this.currentRoom.status === 'started' &&
+        sameRoomStart(this.currentRoom, startedRoom)
+      ) {
+        return
+      }
+
+      this.roomSyncPhase = 'live'
+      this.roomSyncLastEventAt = Date.now()
+      this.roomSyncErrorCode = null
+      this.logRoomSync('start-response-accepted', room.code, startedRoom)
+      this.updateLobby(startedRoom)
     } catch (error) {
-      this.showLobbyError(toUserMessage(error))
+      startError = toUserMessage(error)
+    } finally {
+      if (this.isActiveLobby(room.code, generation)) {
+        this.roomStartPending = false
+        this.renderLobbySyncUi()
+        if (startError) {
+          this.showLobbyError(startError)
+        }
+      }
     }
   }
-
   private scheduleRoomGame(room: StartedRoom): void {
     if (room.start.contentVersion !== CONTENT_VERSION) {
+      this.cleanupLobbySync()
       this.showLobbyError(
         '게임 콘텐츠 버전이 달라 시작할 수 없습니다. 새로고침해 주세요.',
       )
@@ -814,6 +1296,8 @@ export class AppController {
       return
     }
     this.scheduledRoomKey = scheduleKey
+    const generation = this.viewGeneration
+    this.cleanupLobbySync()
 
     this.screenRoot.innerHTML = `
       <div class="app-screen countdown-screen">
@@ -836,18 +1320,26 @@ export class AppController {
 
     const delay = Math.max(0, room.start.startAt - Date.now())
     this.gameStartTimeout = window.setTimeout(() => {
+      const currentRoom = this.currentRoom
+      if (
+        generation !== this.viewGeneration ||
+        !currentRoom ||
+        currentRoom.status !== 'started' ||
+        !sameRoomStart(currentRoom, room)
+      ) {
+        return
+      }
       this.startGame(this.createRoomGameLaunchOptions(room))
       this.scheduleRoomResultDeadline(room)
     }, delay)
   }
-
   private startGame(options: GameLaunchOptions): void {
     this.gameProgressStore.clearForPlayerExcept(
       this.playerId,
       options.progressIdentity ?? null,
     )
     this.viewGeneration += 1
-    this.cleanupRoomSubscription()
+    this.cleanupLobbySync()
     this.cleanupResultSubscription()
     this.clearRoomResultDeadline()
     this.activeRoomResultFlow = null
@@ -855,7 +1347,6 @@ export class AppController {
     this.screenRoot.hidden = true
     this.gameHost.start(options)
   }
-
   private createRoomGameLaunchOptions(
     room: StartedRoom,
   ): GameLaunchOptions {
@@ -1816,13 +2307,14 @@ export class AppController {
 
   private cleanupRoomFlow(): void {
     this.stopQrScanner()
-    this.cleanupRoomSubscription()
+    this.cleanupLobbySync()
     this.cleanupResultSubscription()
     this.clearRoomResultDeadline()
     this.clearCountdown()
     this.activeRoomResultFlow = null
     this.currentRoom = null
     this.scheduledRoomKey = null
+    this.roomSyncLastEventAt = null
   }
 
   private cleanupResultSubscription(): void {
@@ -1830,11 +2322,55 @@ export class AppController {
     this.unsubscribeResults = null
   }
 
-  private cleanupRoomSubscription(): void {
-    this.unsubscribeRoom?.()
-    this.unsubscribeRoom = null
+  private cleanupLobbySync(): void {
+    this.dropRoomSubscription()
+    this.clearRoomSyncRetryTimeout()
+    this.cleanupLobbyRecoveryTriggers()
+    this.roomSyncRefreshTask = null
+    this.roomStartPending = false
+    this.roomSyncPhase = 'idle'
+    this.roomSyncRetryCount = 0
+    this.roomSyncErrorCode = null
   }
 
+  private cleanupRoomSubscription(): void {
+    this.dropRoomSubscription()
+  }
+
+  private dropRoomSubscription(): void {
+    this.roomSyncConnectionToken += 1
+    this.unsubscribeRoom?.()
+    this.unsubscribeRoom = null
+    this.clearRoomSyncWatchdog()
+  }
+
+  private clearRoomSyncWatchdog(): void {
+    if (this.roomSyncWatchdogTimeout !== null) {
+      window.clearTimeout(this.roomSyncWatchdogTimeout)
+      this.roomSyncWatchdogTimeout = null
+    }
+  }
+
+  private clearRoomSyncRetryTimeout(): void {
+    if (this.roomSyncRetryTimeout !== null) {
+      window.clearTimeout(this.roomSyncRetryTimeout)
+      this.roomSyncRetryTimeout = null
+    }
+  }
+
+  private cleanupLobbyRecoveryTriggers(): void {
+    if (this.lobbyVisibilityHandler) {
+      document.removeEventListener(
+        'visibilitychange',
+        this.lobbyVisibilityHandler,
+      )
+      this.lobbyVisibilityHandler = null
+    }
+    if (this.lobbyOnlineHandler) {
+      window.removeEventListener('online', this.lobbyOnlineHandler)
+      this.lobbyOnlineHandler = null
+    }
+  }
   private clearCountdown(): void {
     if (this.countdownInterval !== null) {
       window.clearInterval(this.countdownInterval)
@@ -1967,6 +2503,24 @@ export class AppController {
   }
 }
 
+function sameRoomStart(left: StartedRoom, right: StartedRoom): boolean {
+  return (
+    left.code === right.code &&
+    left.start.deckSeed === right.start.deckSeed &&
+    left.start.contentVersion === right.start.contentVersion &&
+    left.start.startAt === right.start.startAt &&
+    left.start.resultDeadlineAt === right.start.resultDeadlineAt &&
+    left.start.roster.length === right.start.roster.length &&
+    left.start.roster.every((player, index) => {
+      const other = right.start.roster[index]
+      return (
+        other !== undefined &&
+        player.playerId === other.playerId &&
+        player.rosterOrder === other.rosterOrder
+      )
+    })
+  )
+}
 function getOrCreatePlayerId(): string {
   const existing = sessionStorage.getItem(PLAYER_ID_STORAGE_KEY)
   if (existing) {

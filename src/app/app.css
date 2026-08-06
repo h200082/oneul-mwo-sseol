@@ -338,6 +338,37 @@
   height: 100%;
 }
 
+.qr-frame img[hidden],
+.qr-frame span[hidden] {
+  display: none;
+}
+
+.qr-frame span {
+  padding: 12px;
+  color: #53677a;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.qr-frame[data-state="loading"] {
+  background:
+    linear-gradient(110deg, #fff8e7 25%, #edf1e8 42%, #fff8e7 59%);
+  background-size: 220% 100%;
+  animation: qr-loading 1.4s ease-in-out infinite;
+}
+
+.qr-frame[data-state="error"] {
+  border: 1px dashed #d2b96c;
+  background: #fff3d3;
+}
+
+@keyframes qr-loading {
+  to {
+    background-position-x: -220%;
+  }
+}
 .invite-copy {
   display: flex;
   min-width: 0;
@@ -425,6 +456,22 @@
   font-size: 17px;
 }
 
+.lobby-footer [data-sync-phase="recovering"],
+.lobby-footer [data-sync-phase="connecting"] {
+  color: #ffd76a;
+}
+
+.lobby-footer [data-sync-phase="failed"] {
+  color: #ff9b83;
+}
+
+.lobby-footer .lobby-sync-retry {
+  min-height: 42px;
+  margin-bottom: 8px;
+  border-color: #ffd76a;
+  color: #ffd76a;
+  font-size: 14px;
+}
 .countdown-screen {
   display: grid;
   place-content: center;

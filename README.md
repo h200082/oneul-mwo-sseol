@@ -114,6 +114,7 @@ npm run typecheck
 npm test
 npm run test:firebase-rules
 npm run test:e2e
+npm run test:e2e:firebase
 npm run build
 npm run preview
 ```
@@ -122,6 +123,7 @@ npm run preview
 - `npm test`: 기하·게임 규칙·메뉴·방·초대·QR 스캔·로컬/Firebase 런타임·공동 결과 집계 단위 테스트를 실행합니다.
 - `npm run test:firebase-rules`: Firestore 에뮬레이터에서 실제 보안 규칙의 허용·거부 경계를 검증합니다.
 - `npm run test:e2e`: 설치된 Google Chrome으로 홈, 핵심 제스처, 동일 출처 멀티탭 방 시작·방장 승계·대기실 및 시작 후 재접속·공동 결과 화면을 검증합니다.
+- `npm run test:e2e:firebase`: 서로 격리된 Android형·iPhone형 BrowserContext를 Auth·Firestore 에뮬레이터에 연결해 QR 초대 URL 참가, 즉시 시작, 동일 명단·덱 동기화를 검증합니다.
 - `npm run build`: 통과했으며 제출용 정적 파일을 `dist/`에 생성합니다.
 - `npm run preview`: 생성된 `dist/` 빌드를 로컬에서 최종 확인합니다.
 
