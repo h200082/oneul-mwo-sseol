@@ -415,6 +415,10 @@ describe('BrowserSensoryFeedbackOutput', () => {
     await expect(output.unlock()).resolves.toBe(true)
 
     expect(harness.contexts).toHaveLength(1)
+    expect(context.gains[0]!.gain.setValueAtTime).toHaveBeenCalledWith(
+      0.78,
+      context.currentTime,
+    )
     expect(context.resume).toHaveBeenCalledTimes(3)
   })
 

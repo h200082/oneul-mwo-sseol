@@ -52,6 +52,8 @@ const PLAYER_ID_STORAGE_KEY = 'oneul-mwo-sseol-player-id'
 const NICKNAME_STORAGE_KEY = 'oneul-mwo-sseol-nickname'
 const CONTENT_VERSION = 'menus-v1'
 const ROOM_COUNTDOWN_MS = 3_000
+const ROOM_COUNTDOWN_SOUND_SCALE = 0.8
+const ROOM_EVENT_SOUND_SCALE = 0.86
 const RESULT_COUNTDOWN_REFRESH_MS = 1_000
 const RESULT_FINALIZATION_RETRY_MS = 2_000
 const ROOM_SYNC_WATCHDOG_MS = 5_000
@@ -1541,7 +1543,7 @@ export class AppController {
       countdown.textContent = String(nextValue)
       if (nextValue !== previousCountdownValue) {
         previousCountdownValue = nextValue
-        this.sensoryFeedback.trigger('countdown', 0.7)
+        this.sensoryFeedback.trigger('countdown', ROOM_COUNTDOWN_SOUND_SCALE)
       }
     }
     updateCountdown()
@@ -1559,7 +1561,7 @@ export class AppController {
         return
       }
       this.startGame(this.createRoomGameLaunchOptions(room))
-      this.sensoryFeedback.trigger('start', 0.72)
+      this.sensoryFeedback.trigger('start', ROOM_EVENT_SOUND_SCALE)
       this.scheduleRoomResultDeadline(room)
     }, delay)
   }
@@ -1868,7 +1870,7 @@ export class AppController {
     this.cleanupResultSubscription()
     this.clearRoomResultDeadline()
     this.renderRoomResultsSummary(flow.room, resolution.summary)
-    this.sensoryFeedback.trigger('results', 0.72)
+    this.sensoryFeedback.trigger('results', ROOM_EVENT_SOUND_SCALE)
   }
 
   private async handleRoomResultDeadline(

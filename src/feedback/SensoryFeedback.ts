@@ -96,22 +96,22 @@ const CUE_SPECS: Readonly<Record<SensoryCue, SensoryCueSpec>> =
         tone('square', 660, 760, 0, 70, 0.025),
         tone('square', 990, 1_180, 82, 95, 0.03),
       ],
-      [18],
+      [26],
     ),
     'slice-low': cue(
       [tone('sawtooth', 270, 150, 0, 75, 0.024)],
-      [12],
+      [24],
     ),
     'slice-good': cue(
       [tone('triangle', 430, 620, 0, 70, 0.027)],
-      [12],
+      [30],
     ),
     'slice-great': cue(
       [
         tone('triangle', 610, 900, 0, 78, 0.03),
         tone('sine', 1_020, 1_260, 42, 72, 0.018),
       ],
-      [12],
+      [38],
     ),
     'slice-perfect': cue(
       [
@@ -119,7 +119,7 @@ const CUE_SPECS: Readonly<Record<SensoryCue, SensoryCueSpec>> =
         tone('sine', 1_180, 1_520, 52, 105, 0.027),
         tone('sine', 1_620, 1_920, 118, 105, 0.02),
       ],
-      [12, 32, 18],
+      [34, 24, 48],
     ),
     capture: cue(
       [
@@ -127,7 +127,7 @@ const CUE_SPECS: Readonly<Record<SensoryCue, SensoryCueSpec>> =
         tone('sine', 560, 720, 72, 100, 0.037),
         tone('triangle', 760, 1_020, 150, 120, 0.035),
       ],
-      [22, 42, 38],
+      [42, 30, 62],
     ),
     'miss-warning': cue(
       [tone('square', 190, 160, 0, 48, 0.015)],
@@ -135,14 +135,14 @@ const CUE_SPECS: Readonly<Record<SensoryCue, SensoryCueSpec>> =
     ),
     miss: cue(
       [tone('sawtooth', 210, 92, 0, 135, 0.032)],
-      [32],
+      [48],
     ),
     'final-five': cue(
       [
         tone('square', 590, 660, 0, 88, 0.026),
         tone('square', 880, 1_020, 125, 105, 0.032),
       ],
-      [14, 36, 14],
+      [28, 30, 40],
     ),
     results: cue(
       [
@@ -150,7 +150,7 @@ const CUE_SPECS: Readonly<Record<SensoryCue, SensoryCueSpec>> =
         tone('triangle', 660, 760, 92, 125, 0.032),
         tone('triangle', 790, 980, 190, 155, 0.036),
       ],
-      [18, 45, 28],
+      [34, 36, 56],
     ),
   })
 
@@ -679,7 +679,7 @@ export class BrowserSensoryFeedbackOutput
         }
         context = new AudioContextClass()
         const masterGain = context.createGain()
-        masterGain.gain.setValueAtTime(0.72, context.currentTime)
+        masterGain.gain.setValueAtTime(0.78, context.currentTime)
         masterGain.connect(context.destination)
         this.context = context
         this.masterGain = masterGain

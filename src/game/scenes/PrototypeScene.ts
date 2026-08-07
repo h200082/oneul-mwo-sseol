@@ -62,6 +62,7 @@ const FINAL_SPRINT_ROUND_INDEX = 15
 const FINAL_SPRINT_BANNER_MS = 760
 const HUD_SCORE_CENTER_X = 170
 const ACCURACY_POPUP_MIN_Y = 232
+const ROOM_SOUND_SCALE = 0.86
 const SLICE_SENSORY_CUE = Object.freeze({
   'needs-practice': 'slice-low',
   good: 'slice-good',
@@ -574,7 +575,7 @@ export class PrototypeScene extends Phaser.Scene {
   private triggerSensory(cue: SensoryCue): void {
     this.sensoryFeedback.trigger(
       cue,
-      this.launchOptions.mode === 'room' ? 0.72 : 1,
+      this.launchOptions.mode === 'room' ? ROOM_SOUND_SCALE : 1,
     )
   }
 

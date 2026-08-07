@@ -92,6 +92,10 @@ describe('sensory cue definitions', () => {
 
   it('keeps action haptics perceptible, bounded, and easy to retune', () => {
     const actionCues: readonly SensoryCue[] = [
+      'start',
+      'slice-low',
+      'slice-good',
+      'slice-great',
       'slice-perfect',
       'capture',
       'miss',
@@ -109,8 +113,10 @@ describe('sensory cue definitions', () => {
         .toBeLessThanOrEqual(180)
     }
 
-    expect(getSensoryCueSpec('slice-perfect').vibration.length)
-      .toBeGreaterThan(getSensoryCueSpec('slice-good').vibration.length)
+    expect(getSensoryCueSpec('slice-low').vibration).toEqual([24])
+    expect(getSensoryCueSpec('slice-good').vibration).toEqual([30])
+    expect(getSensoryCueSpec('slice-great').vibration).toEqual([38])
+    expect(getSensoryCueSpec('slice-perfect').vibration).toEqual([34, 24, 48])
     expect(getSensoryCueSpec('capture').vibration.length).toBeGreaterThan(1)
     expect(getSensoryCueSpec('miss').vibration).toHaveLength(1)
   })
@@ -132,7 +138,7 @@ describe('SensoryFeedbackController', () => {
       0.72,
     )
     expect(output.vibrate).toHaveBeenCalledOnce()
-    expect(output.vibrate).toHaveBeenCalledWith([22, 42, 38])
+    expect(output.vibrate).toHaveBeenCalledWith([42, 30, 62])
     expect(feedback.getDebugState()).toMatchObject({
       lastCue: 'capture',
       triggerCount: 1,
