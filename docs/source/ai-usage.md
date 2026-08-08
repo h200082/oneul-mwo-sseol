@@ -179,7 +179,7 @@ Firebase JavaScript SDK 12.16.0을 추가하고 다음 항목을 코드와 에�
 | 백엔드 SDK | Firebase JavaScript SDK 12.16.0 | 익명 인증·Cloud Firestore | https://github.com/firebase/firebase-js-sdk | Google LLC | Apache-2.0 | 패키지 원본 미수정 |
 | 규칙 테스트 | `@firebase/rules-unit-testing` 5.0.1 | Firestore Security Rules 통합 테스트 | https://github.com/firebase/firebase-js-sdk | Google LLC | Apache-2.0 | 패키지 원본 미수정 |
 | 개발 도구 | Firebase CLI 15.24.0 | 로컬 Firestore 에뮬레이터 실행 | https://github.com/firebase/firebase-tools | Google LLC | MIT | `npx`로 고정 버전 실행, 원본 미수정 |
-| AI 음식 이미지 | 활성 대표 음식 11종 WebP | 게임 토큰·공동 결과 카드 | `docs/evidence/ai-prompts/2026-08-01-food-visual-slice.md`, `2026-08-08-food-action-sticker-v2.md`, `2026-08-08-alpha-silhouette-food-batch.md` | 프로젝트 직접 생성 | [OpenAI Terms of Use](https://openai.com/policies/terms-of-use/) Content 항목 확인(2026-08-01) | 크로마키 제거·알파 외곽 정규화·512×512 WebP 최적화·연결성 검증 |
+| AI 음식 이미지 | 활성 대표 음식 11종 WebP | 게임 토큰·공동 결과 카드 | `docs/evidence/ai-prompts/2026-08-01-food-visual-slice.md`, `2026-08-08-food-action-sticker-v2.md`, `2026-08-08-alpha-silhouette-food-batch.md`, `2026-08-08-appetizing-action-silhouettes.md` | 프로젝트 직접 생성 | [OpenAI Terms of Use](https://openai.com/policies/terms-of-use/) Content 항목 확인(2026-08-01) | 크로마키 제거·알파 외곽 정규화·긴 변 512px·원본 비율 보존 WebP 최적화·연결성 검증 |
 
 직접 의존성의 버전은 `package.json`과 `package-lock.json`, 라이선스명은 설치된 각 패키지의 `package.json` 메타데이터로 2026-07-31에 확인했다. 최종 제출 버전 동결 후 전체 전이 의존성과 포함해야 할 고지문을 다시 확인한다.
 

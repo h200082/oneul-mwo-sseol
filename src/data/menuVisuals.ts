@@ -1,14 +1,14 @@
 import friedChickenImageUrl from '../assets/food/fried-chicken-v2.webp'
-import galbitangImageUrl from '../assets/food/galbitang.webp'
-import gimbapImageUrl from '../assets/food/gimbap.webp'
-import homeStyleBaekbanImageUrl from '../assets/food/home-style-baekban.webp'
+import galbitangImageUrl from '../assets/food/galbitang-v2.webp'
+import gimbapImageUrl from '../assets/food/gimbap-v2.webp'
+import homeStyleBaekbanImageUrl from '../assets/food/home-style-baekban-v2.webp'
 import kimchiJjigaeImageUrl from '../assets/food/kimchi-jjigae.webp'
-import omuriceImageUrl from '../assets/food/omurice.webp'
+import omuriceImageUrl from '../assets/food/omurice-v2.webp'
 import pizzaImageUrl from '../assets/food/pizza.webp'
 import ramyeonImageUrl from '../assets/food/ramyeon-v2.webp'
-import sandwichImageUrl from '../assets/food/sandwich.webp'
+import sandwichImageUrl from '../assets/food/sandwich-v2.webp'
 import sushiImageUrl from '../assets/food/sushi.webp'
-import tteokbokkiImageUrl from '../assets/food/tteokbokki.webp'
+import tteokbokkiImageUrl from '../assets/food/tteokbokki-v2.webp'
 import {
   createAlphaSilhouetteMask,
   type AlphaSilhouetteMask,

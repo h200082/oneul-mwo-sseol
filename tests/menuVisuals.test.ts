@@ -11,18 +11,18 @@ import {
   preloadMenuVisuals,
 } from '../src/data/menuVisuals'
 
-const ASSET_FILENAMES = [
-  'ramyeon-v2.webp',
-  'kimchi-jjigae.webp',
-  'sushi.webp',
-  'fried-chicken-v2.webp',
-  'pizza.webp',
-  'galbitang.webp',
-  'omurice.webp',
-  'gimbap.webp',
-  'sandwich.webp',
-  'tteokbokki.webp',
-  'home-style-baekban.webp',
+const ASSET_DESCRIPTORS = [
+  { filename: 'ramyeon-v2.webp', width: 512, height: 512 },
+  { filename: 'kimchi-jjigae.webp', width: 512, height: 512 },
+  { filename: 'sushi.webp', width: 512, height: 512 },
+  { filename: 'fried-chicken-v2.webp', width: 512, height: 512 },
+  { filename: 'pizza.webp', width: 512, height: 512 },
+  { filename: 'galbitang-v2.webp', width: 438, height: 512 },
+  { filename: 'omurice-v2.webp', width: 512, height: 332 },
+  { filename: 'gimbap-v2.webp', width: 512, height: 341 },
+  { filename: 'sandwich-v2.webp', width: 512, height: 330 },
+  { filename: 'tteokbokki-v2.webp', width: 394, height: 512 },
+  { filename: 'home-style-baekban-v2.webp', width: 512, height: 175 },
 ] as const
 
 describe('MENU_VISUALS', () => {
@@ -42,13 +42,16 @@ describe('MENU_VISUALS', () => {
     expect(getMenuVisual('menu-without-art')).toBeUndefined()
   })
 
-  it('stores eleven 512px alpha WebPs inside the mobile loading budget', () => {
-    const assets = ASSET_FILENAMES.map((filename) => {
-      const fileUrl = new URL(`../src/assets/food/${filename}`, import.meta.url)
-      return readFileSync(fileURLToPath(fileUrl))
+  it('stores eleven aspect-preserving alpha WebPs inside the mobile loading budget', () => {
+    const assets = ASSET_DESCRIPTORS.map((descriptor) => {
+      const fileUrl = new URL(
+        `../src/assets/food/${descriptor.filename}`,
+        import.meta.url,
+      )
+      return { descriptor, asset: readFileSync(fileURLToPath(fileUrl)) }
     })
 
-    for (const asset of assets) {
+    for (const { descriptor, asset } of assets) {
       expect(asset.length).toBeGreaterThan(1_000)
       expect(asset.length).toBeLessThan(120_000)
       expect(asset.subarray(0, 4).toString('ascii')).toBe('RIFF')
@@ -56,14 +59,18 @@ describe('MENU_VISUALS', () => {
       expect(asset.subarray(12, 16).toString('ascii')).toBe('VP8X')
       expect(asset[20]! & 0x10).toBe(0x10)
       expect(asset.includes(Buffer.from('ALPH'))).toBe(true)
-      expect(readUint24Le(asset, 24) + 1).toBe(512)
-      expect(readUint24Le(asset, 27) + 1).toBe(512)
+      expect(readUint24Le(asset, 24) + 1).toBe(descriptor.width)
+      expect(readUint24Le(asset, 27) + 1).toBe(descriptor.height)
+      expect(Math.max(descriptor.width, descriptor.height)).toBe(512)
     }
+
+    for (const descriptor of ASSET_DESCRIPTORS.slice(5)) {
+      expect(descriptor.width).not.toBe(descriptor.height)
+    }
+
     expect(
-      assets.reduce((total, asset) => total + asset.length, 0),
-    ).toBeLessThan(
-      750_000,
-    )
+      assets.reduce((total, { asset }) => total + asset.length, 0),
+    ).toBeLessThan(750_000)
   })
 
   it('does not require the browser Image API in the unit-test runtime', async () => {
