@@ -35,5 +35,7 @@ AI를 사용한 중요한 작업마다 Markdown 파일 하나를 생성합니다
 | 2026-08-05 | 모바일 방 초대·로비 동기화 안정화 | `2026-08-05-mobile-room-sync-hardening.md` |
 | 2026-08-05 | 게임 온보딩·판정 피드백 | `2026-08-05-gameplay-onboarding-feedback.md` |
 | 2026-08-05 | 게임 효과음·진동 피드백 | `2026-08-05-sensory-feedback.md` |
+| 2026-08-08 | 비원형 치킨·라면 Food Action Sticker v2 | `2026-08-08-food-action-sticker-v2.md` |
+| 2026-08-08 | 실제 알파 실루엣 판정·음식 6종 확장 | `2026-08-08-alpha-silhouette-food-batch.md` |
 
 새 로그를 추가할 때 이 표도 함께 갱신하고, 실제 반영 범위와 아직 완료하지 않은 검증을 구분해 적습니다.

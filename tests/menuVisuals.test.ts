@@ -17,15 +17,21 @@ const ASSET_FILENAMES = [
   'sushi.webp',
   'fried-chicken-v2.webp',
   'pizza.webp',
+  'galbitang.webp',
+  'omurice.webp',
+  'gimbap.webp',
+  'sandwich.webp',
+  'tteokbokki.webp',
+  'home-style-baekban.webp',
 ] as const
 
 describe('MENU_VISUALS', () => {
-  it('maps five existing menus to unique Phaser textures', () => {
+  it('maps eleven existing menus to unique Phaser textures', () => {
     const catalogIds = new Set(MENU_CATALOG.map((menu) => menu.id))
 
-    expect(MENU_VISUALS).toHaveLength(5)
-    expect(new Set(MENU_VISUALS.map((visual) => visual.menuId)).size).toBe(5)
-    expect(new Set(MENU_VISUALS.map((visual) => visual.textureKey)).size).toBe(5)
+    expect(MENU_VISUALS).toHaveLength(11)
+    expect(new Set(MENU_VISUALS.map((visual) => visual.menuId)).size).toBe(11)
+    expect(new Set(MENU_VISUALS.map((visual) => visual.textureKey)).size).toBe(11)
 
     for (const visual of MENU_VISUALS) {
       expect(catalogIds.has(visual.menuId)).toBe(true)
@@ -36,7 +42,7 @@ describe('MENU_VISUALS', () => {
     expect(getMenuVisual('menu-without-art')).toBeUndefined()
   })
 
-  it('stores five 512px alpha WebPs inside the mobile loading budget', () => {
+  it('stores eleven 512px alpha WebPs inside the mobile loading budget', () => {
     const assets = ASSET_FILENAMES.map((filename) => {
       const fileUrl = new URL(`../src/assets/food/${filename}`, import.meta.url)
       return readFileSync(fileURLToPath(fileUrl))
@@ -56,7 +62,7 @@ describe('MENU_VISUALS', () => {
     expect(
       assets.reduce((total, asset) => total + asset.length, 0),
     ).toBeLessThan(
-      250_000,
+      750_000,
     )
   })
 

@@ -6,10 +6,19 @@ interface PrototypeDebugState {
     readonly y: number
     readonly menuId: string
     readonly fallDurationMs: number
-    readonly judgement: {
-      readonly kind: 'circle'
-      readonly radius: number
-    }
+    readonly judgement:
+      | {
+          readonly kind: 'alpha-mask'
+          readonly radius: number
+          readonly width: number
+          readonly height: number
+          readonly opaquePixelCount: number
+          readonly alphaThreshold: number
+        }
+      | {
+          readonly kind: 'circle-fallback'
+          readonly radius: number
+        }
     readonly visual: {
       readonly hasVisual: boolean
       readonly width: number
@@ -273,8 +282,11 @@ test('대표 음식 이미지를 Phaser 토큰으로 등록한다', async ({ pag
     menuId: 'kimchi-jjigae',
     fallDurationMs: 2_600,
     judgement: {
-      kind: 'circle',
+      kind: 'alpha-mask',
       radius: 64,
+      width: 128,
+      height: 128,
+      alphaThreshold: 32,
     },
     visual: {
       hasVisual: true,
@@ -296,11 +308,80 @@ for (const visualCase of [
 
     expect((await readDebugState(page)).activeToken).toMatchObject({
       menuId: visualCase.menuId,
-      judgement: { kind: 'circle', radius: 64 },
+      judgement: {
+        kind: 'alpha-mask',
+        radius: 64,
+        width: 128,
+        height: 128,
+        alphaThreshold: 32,
+      },
       visual: { hasVisual: true, width: 112, height: 112 },
     })
   })
 }
+
+test('치킨 이미지의 투명한 모서리는 베기로 판정하지 않는다', async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name === 'mobile-chromium',
+    '정밀한 투명 픽셀 경계는 데스크톱 Chromium에서 검증합니다.',
+  )
+
+  await startVisualGameForTest(page, 36)
+  await waitForActiveToken(page)
+  const initial = await readDebugState(page)
+  const token = initial.activeToken
+  expect(token).toMatchObject({
+    menuId: 'fried-chicken',
+    judgement: { kind: 'alpha-mask' },
+  })
+  if (!token) return
+
+  const transform = await getCanvasTransform(page)
+  const transparentStart = toPagePoint(
+    transform,
+    token.x + 52,
+    token.y - 45,
+  )
+  const transparentEnd = toPagePoint(
+    transform,
+    token.x + 52,
+    token.y + 45,
+  )
+  await page.mouse.move(transparentStart.x, transparentStart.y)
+  await page.mouse.down()
+  await page.mouse.move(transparentEnd.x, transparentEnd.y, { steps: 6 })
+  await page.mouse.up()
+  await page.waitForTimeout(80)
+
+  expect((await readDebugState(page)).completedRounds).toBe(0)
+
+  const current = (await readDebugState(page)).activeToken
+  expect(current).not.toBeNull()
+  if (!current) return
+  const bodyStart = toPagePoint(
+    transform,
+    current.x - 80,
+    current.y - 7,
+  )
+  const bodyEnd = toPagePoint(
+    transform,
+    current.x + 80,
+    current.y - 7,
+  )
+  await page.mouse.move(bodyStart.x, bodyStart.y)
+  await page.mouse.down()
+  await page.mouse.move(bodyEnd.x, bodyEnd.y, { steps: 8 })
+  await page.mouse.up()
+
+  await expect
+    .poll(async () => (await readDebugState(page)).completedRounds)
+    .toBe(1)
+  await expect
+    .poll(async () => (await readDebugState(page)).lastAction)
+    .toBe('slice')
+})
 
 test('드래그 중에도 음식은 계속 내려온다', async ({ page }, testInfo) => {
   test.skip(

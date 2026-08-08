@@ -1,8 +1,18 @@
 import friedChickenImageUrl from '../assets/food/fried-chicken-v2.webp'
+import galbitangImageUrl from '../assets/food/galbitang.webp'
+import gimbapImageUrl from '../assets/food/gimbap.webp'
+import homeStyleBaekbanImageUrl from '../assets/food/home-style-baekban.webp'
 import kimchiJjigaeImageUrl from '../assets/food/kimchi-jjigae.webp'
+import omuriceImageUrl from '../assets/food/omurice.webp'
 import pizzaImageUrl from '../assets/food/pizza.webp'
 import ramyeonImageUrl from '../assets/food/ramyeon-v2.webp'
+import sandwichImageUrl from '../assets/food/sandwich.webp'
 import sushiImageUrl from '../assets/food/sushi.webp'
+import tteokbokkiImageUrl from '../assets/food/tteokbokki.webp'
+import {
+  createAlphaSilhouetteMask,
+  type AlphaSilhouetteMask,
+} from '../domain/alphaSilhouette'
 
 export interface MenuVisual {
   readonly menuId: string
@@ -70,6 +80,36 @@ export const MENU_VISUALS: readonly MenuVisual[] = Object.freeze([
     textureKey: 'food:pizza',
     imageUrl: pizzaImageUrl,
   },
+  {
+    menuId: 'galbitang',
+    textureKey: 'food:galbitang',
+    imageUrl: galbitangImageUrl,
+  },
+  {
+    menuId: 'omurice',
+    textureKey: 'food:omurice',
+    imageUrl: omuriceImageUrl,
+  },
+  {
+    menuId: 'gimbap',
+    textureKey: 'food:gimbap',
+    imageUrl: gimbapImageUrl,
+  },
+  {
+    menuId: 'sandwich',
+    textureKey: 'food:sandwich',
+    imageUrl: sandwichImageUrl,
+  },
+  {
+    menuId: 'tteokbokki',
+    textureKey: 'food:tteokbokki',
+    imageUrl: tteokbokkiImageUrl,
+  },
+  {
+    menuId: 'home-style-baekban',
+    textureKey: 'food:home-style-baekban',
+    imageUrl: homeStyleBaekbanImageUrl,
+  },
 ])
 
 const MENU_VISUAL_BY_ID = new Map(
@@ -82,7 +122,10 @@ export function getMenuVisual(
   return MENU_VISUAL_BY_ID.get(menuId)
 }
 
+export const MENU_ALPHA_MASK_RESOLUTION = 128
+
 const PRELOADED_MENU_IMAGES = new Map<string, HTMLImageElement>()
+const PRELOADED_MENU_ALPHA_MASKS = new Map<string, AlphaSilhouetteMask>()
 let preloadPromise: Promise<void> | null = null
 
 /**
@@ -120,6 +163,11 @@ export function preloadMenuVisuals(): Promise<void> {
       }
 
       PRELOADED_MENU_IMAGES.set(visual.menuId, image)
+
+      const alphaMask = createMenuAlphaMask(image)
+      if (alphaMask && alphaMask.totalWeight > 0) {
+        PRELOADED_MENU_ALPHA_MASKS.set(visual.menuId, alphaMask)
+      }
     }),
   ).then(() => undefined)
 
@@ -130,4 +178,47 @@ export function getPreloadedMenuImage(
   menuId: string,
 ): HTMLImageElement | undefined {
   return PRELOADED_MENU_IMAGES.get(menuId)
+}
+
+export function getPreloadedMenuAlphaMask(
+  menuId: string,
+): AlphaSilhouetteMask | undefined {
+  return PRELOADED_MENU_ALPHA_MASKS.get(menuId)
+}
+
+function createMenuAlphaMask(
+  image: HTMLImageElement,
+): AlphaSilhouetteMask | undefined {
+  if (typeof document === 'undefined') {
+    return undefined
+  }
+
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = MENU_ALPHA_MASK_RESOLUTION
+    canvas.height = MENU_ALPHA_MASK_RESOLUTION
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) {
+      return undefined
+    }
+
+    context.clearRect(0, 0, canvas.width, canvas.height)
+    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    const rgba = context.getImageData(
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    ).data
+    const alpha = new Uint8Array(canvas.width * canvas.height)
+    for (let pixel = 0; pixel < alpha.length; pixel += 1) {
+      alpha[pixel] = rgba[pixel * 4 + 3]!
+    }
+
+    return createAlphaSilhouetteMask(canvas.width, canvas.height, alpha)
+  } catch {
+    // Canvas readback can fail in privacy-restricted browsers. Artwork still
+    // renders and gameplay safely falls back to the established circle.
+    return undefined
+  }
 }

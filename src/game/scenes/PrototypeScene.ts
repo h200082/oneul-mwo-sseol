@@ -5,11 +5,14 @@ import {
   type SensoryFeedback,
   type SensoryFeedbackDebugState,
 } from '../../feedback/SensoryFeedback'
+import type { PlacedSilhouette } from '../../domain/alphaSilhouette'
 import { type Circle, type Point } from '../../domain/geometry'
 import {
   classifyGesture,
+  type GestureMetrics,
   type SliceGestureDecision,
 } from '../../domain/gestureClassifier'
+import { classifySilhouetteGesture } from '../../domain/silhouetteGestureClassifier'
 import {
   MAX_CAPTURES,
   calculatePlayerScore,
@@ -26,6 +29,7 @@ import {
 import {
   calculateContainedSize,
   getMenuVisual,
+  getPreloadedMenuAlphaMask,
   getPreloadedMenuImage,
 } from '../../data/menuVisuals'
 import { LOGICAL_HEIGHT, LOGICAL_WIDTH } from '../createGame'
@@ -70,9 +74,21 @@ const SLICE_SENSORY_CUE = Object.freeze({
   perfect: 'slice-perfect',
 } satisfies Record<SliceFeedback['level'], SensoryCue>)
 
+interface GameplaySliceDecision {
+  readonly kind: 'slice'
+  readonly chord: {
+    readonly entryPoint: Point
+    readonly exitPoint: Point
+  }
+  readonly result: { readonly accuracyScore: number }
+  readonly source: SliceGestureDecision['source']
+  readonly metrics: GestureMetrics
+}
+
 interface TokenVisual {
   readonly children: Phaser.GameObjects.GameObject[]
   readonly hasVisual: boolean
+  readonly silhouette: PlacedSilhouette | null
   readonly renderBounds: {
     readonly width: number
     readonly height: number
@@ -85,6 +101,7 @@ interface ActiveToken {
   readonly tween: Phaser.Tweens.Tween
   readonly fallDurationMs: number
   readonly hasVisual: boolean
+  readonly silhouette: PlacedSilhouette | null
   readonly renderBounds: TokenVisual['renderBounds']
   missWarningShown: boolean
 }
@@ -268,10 +285,19 @@ export class PrototypeScene extends Phaser.Scene {
       readonly y: number
       readonly menuId: string
       readonly fallDurationMs: number
-      readonly judgement: {
-        readonly kind: 'circle'
-        readonly radius: number
-      }
+      readonly judgement:
+        | {
+            readonly kind: 'alpha-mask'
+            readonly radius: number
+            readonly width: number
+            readonly height: number
+            readonly opaquePixelCount: number
+            readonly alphaThreshold: number
+          }
+        | {
+            readonly kind: 'circle-fallback'
+            readonly radius: number
+          }
       readonly visual: {
         readonly hasVisual: boolean
         readonly width: number
@@ -306,10 +332,21 @@ export class PrototypeScene extends Phaser.Scene {
             y: this.activeToken.container.y,
             menuId: this.activeToken.menu.id,
             fallDurationMs: this.activeToken.fallDurationMs,
-            judgement: {
-              kind: 'circle',
-              radius: JUDGEMENT_RADIUS,
-            },
+            judgement: this.activeToken.silhouette
+              ? {
+                  kind: 'alpha-mask',
+                  radius: JUDGEMENT_RADIUS,
+                  width: this.activeToken.silhouette.mask.width,
+                  height: this.activeToken.silhouette.mask.height,
+                  opaquePixelCount:
+                    this.activeToken.silhouette.mask.opaquePixelCount,
+                  alphaThreshold:
+                    this.activeToken.silhouette.mask.alphaThreshold,
+                }
+              : {
+                  kind: 'circle-fallback',
+                  radius: JUDGEMENT_RADIUS,
+                },
             visual: {
               hasVisual: this.activeToken.hasVisual,
               width: this.activeToken.renderBounds.width,
@@ -904,6 +941,7 @@ export class PrototypeScene extends Phaser.Scene {
       tween,
       fallDurationMs,
       hasVisual: tokenVisual.hasVisual,
+      silhouette: tokenVisual.silhouette,
       renderBounds: tokenVisual.renderBounds,
       missWarningShown: false,
     }
@@ -921,6 +959,7 @@ export class PrototypeScene extends Phaser.Scene {
     )
     const visual = getMenuVisual(menu.id)
     const preloadedImage = getPreloadedMenuImage(menu.id)
+    const preloadedAlphaMask = getPreloadedMenuAlphaMask(menu.id)
 
     if (
       visual &&
@@ -974,6 +1013,14 @@ export class PrototypeScene extends Phaser.Scene {
           label,
         ],
         hasVisual: true,
+        silhouette: preloadedAlphaMask
+          ? {
+              mask: preloadedAlphaMask,
+              center: { x: 0, y: -7 },
+              displayWidth: renderBounds.width,
+              displayHeight: renderBounds.height,
+            }
+          : null,
         renderBounds,
       }
     }
@@ -1015,6 +1062,7 @@ export class PrototypeScene extends Phaser.Scene {
     return {
       children: [shadow, food, shine, label],
       hasVisual: false,
+      silhouette: null,
       renderBounds,
     }
   }
@@ -1372,21 +1420,27 @@ export class PrototypeScene extends Phaser.Scene {
       center: { x: 0, y: 0 },
       radius: JUDGEMENT_RADIUS,
     }
-    const decision = classifyGesture(this.localPath, circle, {
-      intentPath: this.path,
-    })
+    const decision: GameplaySliceDecision | ReturnType<typeof classifyGesture> =
+      token.silhouette
+        ? classifySilhouetteGesture(this.localPath, token.silhouette, {
+            intentPath: this.path,
+          })
+        : classifyGesture(this.localPath, circle, {
+            intentPath: this.path,
+          })
 
     if (import.meta.env.DEV) {
       console.debug('[gesture-classification]', {
         decision,
-        circle,
+        judgement: token.silhouette ? 'alpha-mask' : 'circle-fallback',
       })
     }
 
     if (decision.kind === 'slice') {
-      const worldDecision: SliceGestureDecision = {
+      const worldDecision: GameplaySliceDecision = {
         ...decision,
         chord: {
+          ...decision.chord,
           entryPoint: {
             x: decision.chord.entryPoint.x + token.container.x,
             y: decision.chord.entryPoint.y + token.container.y,
@@ -1416,7 +1470,7 @@ export class PrototypeScene extends Phaser.Scene {
 
   private resolveRound(
     action: RoundAction,
-    decision?: SliceGestureDecision,
+    decision?: GameplaySliceDecision,
   ): void {
     const token = this.activeToken
     if (!token) {
@@ -1627,7 +1681,7 @@ export class PrototypeScene extends Phaser.Scene {
 
   private playSliceResolution(
     token: ActiveToken,
-    decision: SliceGestureDecision,
+    decision: GameplaySliceDecision,
     roundedScore: number,
     feedback: Readonly<SliceFeedback>,
   ): void {

@@ -2,7 +2,7 @@
 
 에셋이나 라이브러리를 프로젝트에 추가하는 시점에 바로 기록합니다. 무료 자료도 반드시 원문 URL과 라이선스를 확인합니다.
 
-현재 프로토타입에는 제3자 이미지·사운드·음성·폰트를 포함하지 않았다. 활성 대표 음식 5종과 교체 전 원본 2종은 Codex 내장 ImageGen으로 이 프로젝트를 위해 직접 생성했으며, 프롬프트와 사람의 검토·후처리를 아래에 기록한다. 직접 의존성 버전은 `package.json`과 `package-lock.json`, 라이선스명은 설치된 패키지 메타데이터로 확인했으며 제출 버전 동결 후 다시 점검한다.
+현재 프로토타입에는 제3자 이미지·사운드·음성·폰트를 포함하지 않았다. 활성 대표 음식 11종과 교체 전 원본 2종은 Codex 내장 ImageGen으로 이 프로젝트를 위해 직접 생성했으며, 프롬프트와 사람의 검토·후처리를 아래에 기록한다. 직접 의존성 버전은 `package.json`과 `package-lock.json`, 라이선스명은 설치된 패키지 메타데이터로 확인했으며 제출 버전 동결 후 다시 점검한다.
 
 | 구분 | 이름·파일 | 사용 위치 | 원문 URL | 제작자 | 라이선스 | 상업적 이용 | 수정·재배포 조건 | 확인일 |
 |---|---|---|---|---|---|---|---|---|
@@ -26,4 +26,4 @@
 | 프로토타입 도형·배경 | Phaser Graphics로 런타임 생성 | `ai-prompts/2026-07-27-core-prototype.md` | 모바일 가독성·색상·배치 조정 | 현재 게임 화면 |
 | 절차형 효과음·진동 패턴 | Web Audio Oscillator·Gain과 표준 Vibration API로 런타임 직접 생성 | `ai-prompts/2026-08-05-sensory-feedback.md` | 이벤트별 음높이·길이·gain과 진동 패턴을 직접 검토하고 방 모드 볼륨 축소 | 베기·포획·놓침·카운트다운·후반·결과 피드백 |
 | 방 초대 QR 이미지 | `qrcode`로 실행 중 PNG data URL 생성 | `ai-prompts/2026-07-27-room-lobby-prototype.md` | 실제 초대 URL·오류 대체 경로 검증 | 방 대기실 |
-| `src/assets/food/*.webp` 활성 5종·교체 전 2종 | Codex 내장 ImageGen 생성 후 크로마키 제거·WebP 최적화 | `ai-prompts/2026-08-01-food-visual-slice.md`, `ai-prompts/2026-08-08-food-action-sticker-v2.md` | 결과 선별, 배경 제거, 512×512 정규화, 비원형 실루엣·47px 가독성·모바일 용량 검토 | 게임 토큰과 공동 결과 음식 카드 |
+| `src/assets/food/*.webp` 활성 11종·교체 전 2종 | Codex 내장 ImageGen 생성 후 크로마키 제거·WebP 최적화 | `ai-prompts/2026-08-01-food-visual-slice.md`, `ai-prompts/2026-08-08-food-action-sticker-v2.md`, `ai-prompts/2026-08-08-alpha-silhouette-food-batch.md` | 결과 선별, 배경 제거, 512×512 정규화, 알파 연결성·비원형 실루엣·47px 가독성·모바일 용량 검토 | 게임 토큰과 공동 결과 음식 카드 |
