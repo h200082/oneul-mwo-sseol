@@ -141,11 +141,14 @@ async function startSoloGame(page: Page): Promise<void> {
   await skipSoloIntro(page)
 }
 
-async function startVisualGameForTest(page: Page): Promise<void> {
+async function startVisualGameForTest(
+  page: Page,
+  deckSeed: number | string = 7,
+): Promise<void> {
   await page.waitForFunction(() =>
     Boolean((window as PrototypeDebugWindow).__NHN_APP__),
   )
-  await page.evaluate(() => {
+  await page.evaluate((seed) => {
     const debugWindow = window as PrototypeDebugWindow
     const app = debugWindow.__NHN_APP__
 
@@ -153,8 +156,8 @@ async function startVisualGameForTest(page: Page): Promise<void> {
       throw new Error('앱 디버그 훅을 찾을 수 없습니다.')
     }
 
-    app.getDebugState().startSoloGameForTest(7)
-  })
+    app.getDebugState().startSoloGameForTest(seed)
+  }, deckSeed)
   await expect(page.locator('#game-root canvas')).toBeVisible()
   await skipSoloIntro(page)
 }
@@ -280,6 +283,24 @@ test('대표 음식 이미지를 Phaser 토큰으로 등록한다', async ({ pag
     },
   })
 })
+
+for (const visualCase of [
+  { seed: 36, menuId: 'fried-chicken' },
+  { seed: 40, menuId: 'ramyeon' },
+] as const) {
+  test(`비원형 ${visualCase.menuId} v2 이미지를 게임 토큰으로 등록한다`, async ({
+    page,
+  }) => {
+    await startVisualGameForTest(page, visualCase.seed)
+    await waitForActiveToken(page)
+
+    expect((await readDebugState(page)).activeToken).toMatchObject({
+      menuId: visualCase.menuId,
+      judgement: { kind: 'circle', radius: 64 },
+      visual: { hasVisual: true, width: 112, height: 112 },
+    })
+  })
+}
 
 test('드래그 중에도 음식은 계속 내려온다', async ({ page }, testInfo) => {
   test.skip(

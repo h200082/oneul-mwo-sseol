@@ -1,7 +1,7 @@
-import friedChickenImageUrl from '../assets/food/fried-chicken.webp'
+import friedChickenImageUrl from '../assets/food/fried-chicken-v2.webp'
 import kimchiJjigaeImageUrl from '../assets/food/kimchi-jjigae.webp'
 import pizzaImageUrl from '../assets/food/pizza.webp'
-import ramyeonImageUrl from '../assets/food/ramyeon.webp'
+import ramyeonImageUrl from '../assets/food/ramyeon-v2.webp'
 import sushiImageUrl from '../assets/food/sushi.webp'
 
 export interface MenuVisual {

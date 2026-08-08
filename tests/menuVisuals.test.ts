@@ -12,10 +12,10 @@ import {
 } from '../src/data/menuVisuals'
 
 const ASSET_FILENAMES = [
-  'ramyeon.webp',
+  'ramyeon-v2.webp',
   'kimchi-jjigae.webp',
   'sushi.webp',
-  'fried-chicken.webp',
+  'fried-chicken-v2.webp',
   'pizza.webp',
 ] as const
 
