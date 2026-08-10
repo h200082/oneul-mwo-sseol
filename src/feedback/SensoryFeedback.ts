@@ -451,9 +451,7 @@ const MUSIC_SCHEDULER_INTERVAL_MS = 90
 const MUSIC_SCHEDULE_AHEAD_SECONDS = 0.32
 const MUSIC_SCHEDULE_MAX_STEPS = 8
 export const MUSIC_BUS_GAIN = 1.35
-export const MUSIC_DUCKED_BUS_GAIN = 0.03
-const MUSIC_DUCK_ATTACK_SECONDS = 0.008
-const MUSIC_DUCK_RELEASE_SECONDS = 0.12
+export const MUSIC_DUCKED_BUS_GAIN = MUSIC_BUS_GAIN
 export const MUSIC_EFFECT_DUCKED_BUS_GAIN = 0.02
 const MUSIC_EFFECT_DUCK_ATTACK_SECONDS = 0.008
 const MUSIC_EFFECT_DUCK_HOLD_SECONDS = 0.035
@@ -782,12 +780,8 @@ export class BrowserSensoryFeedbackOutput
 
     try {
       const musicGain = context.createGain()
-      const narrationActive = this.activeNarration !== null
-      musicGain.gain.setValueAtTime(
-        narrationActive ? MUSIC_DUCKED_BUS_GAIN : MUSIC_BUS_GAIN,
-        context.currentTime,
-      )
-      this.musicDuckedState = narrationActive
+      musicGain.gain.setValueAtTime(MUSIC_BUS_GAIN, context.currentTime)
+      this.musicDuckedState = false
       musicGain.connect(masterGain)
       this.musicGain = musicGain
       this.musicStepIndex = 0
@@ -1302,11 +1296,9 @@ export class BrowserSensoryFeedbackOutput
     ) {
       return
     }
-    if (
-      this.setMusicBusGain(MUSIC_DUCKED_BUS_GAIN, MUSIC_DUCK_ATTACK_SECONDS)
-    ) {
-      this.musicDuckedState = true
-    }
+
+    // Narration is intentionally layered over the full-level arcade BGM.
+    this.musicDuckedState = false
   }
 
   private restoreMusicAfterNarration(generation: number): void {
@@ -1316,36 +1308,9 @@ export class BrowserSensoryFeedbackOutput
     ) {
       return
     }
+
+    // Effect sidechain automation owns its own release independently.
     this.musicDuckedState = false
-    const context = this.context
-    const musicGain = this.musicGain
-    if (
-      context &&
-      musicGain &&
-      context.state === 'running' &&
-      this.musicEffectDuckUntil > context.currentTime
-    ) {
-      try {
-        const parameter = musicGain.gain
-        this.cancelMusicBusAutomation(
-          parameter,
-          context,
-          MUSIC_DUCKED_BUS_GAIN,
-        )
-        parameter.setValueAtTime(
-          MUSIC_DUCKED_BUS_GAIN,
-          this.musicEffectDuckUntil,
-        )
-        parameter.linearRampToValueAtTime(
-          MUSIC_BUS_GAIN,
-          this.musicEffectDuckUntil + MUSIC_EFFECT_DUCK_RELEASE_SECONDS,
-        )
-        return
-      } catch {
-        // Fall through to the normal narration release below.
-      }
-    }
-    this.setMusicBusGain(MUSIC_BUS_GAIN, MUSIC_DUCK_RELEASE_SECONDS)
   }
 
   private duckMusicForEffect(
@@ -1376,12 +1341,7 @@ export class BrowserSensoryFeedbackOutput
         MUSIC_EFFECT_DUCK_HOLD_SECONDS,
     )
 
-    // Narration already owns the lower-priority music mix. Its restoration
-    // path observes musicEffectDuckUntil if the voice ends during this cue.
-    if (this.activeNarration !== null) {
-      return
-    }
-
+    // Effect cues retain priority even while narration is playing.
     try {
       const parameter = musicGain.gain
       this.cancelMusicBusAutomation(parameter, context, MUSIC_BUS_GAIN)
@@ -1399,26 +1359,6 @@ export class BrowserSensoryFeedbackOutput
       )
     } catch {
       // Optional music ducking must never suppress the effect itself.
-    }
-  }
-
-  private setMusicBusGain(target: number, rampSeconds: number): boolean {
-    const context = this.context
-    const musicGain = this.musicGain
-    if (!context || !musicGain || context.state !== 'running') {
-      return false
-    }
-
-    try {
-      const parameter = musicGain.gain
-      this.cancelMusicBusAutomation(parameter, context, MUSIC_BUS_GAIN)
-      parameter.linearRampToValueAtTime(
-        target,
-        context.currentTime + rampSeconds,
-      )
-      return true
-    } catch {
-      return false
     }
   }
 

@@ -73,7 +73,7 @@ class FakeOutput implements SensoryFeedbackOutput {
   })
   readonly playNarration = vi.fn((_id: string) => {
     this.narrationPlaying = this.playNarrationResult
-    this.musicDucked = this.playNarrationResult && this.musicPlaying
+    this.musicDucked = false
     return this.playNarrationResult
   })
   readonly stopNarration = vi.fn(() => {

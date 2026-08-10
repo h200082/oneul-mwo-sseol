@@ -815,7 +815,7 @@ describe('BrowserSensoryFeedbackOutput', () => {
     }
   })
 
-  it('deduplicates prepared clips, replaces the active voice, and guards BGM duck restoration', async () => {
+  it('deduplicates prepared clips, keeps BGM full under narration, and preserves effect sidechain', async () => {
     vi.useFakeTimers()
     const narrationLoader = vi.fn(async (_url: string) => new ArrayBuffer(12))
     const { harness, output } = createOutput(
@@ -840,31 +840,38 @@ describe('BrowserSensoryFeedbackOutput', () => {
       const musicGain = context.gains[1]!
       expect(output.playNarration('ramyeon')).toBe(true)
       expect(output.narrationPlaying).toBe(true)
-      expect(output.musicDucked).toBe(true)
+      expect(output.musicDucked).toBe(false)
       const narrationGain = context.gains.at(-1)!
       expect(narrationGain.gain.setValueAtTime).toHaveBeenCalledWith(
         NARRATION_BUS_GAIN,
         context.currentTime,
       )
+      expect(MUSIC_DUCKED_BUS_GAIN).toBe(MUSIC_BUS_GAIN)
+      expect(
+        musicGain.gain.linearRampToValueAtTime,
+      ).not.toHaveBeenCalled()
+
+      expect(output.play([FIRST_TONE], 1)).toBe(true)
       expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(
-        MUSIC_DUCKED_BUS_GAIN,
+        MUSIC_EFFECT_DUCKED_BUS_GAIN,
         context.currentTime + 0.008,
       )
+      const sidechainRampCallCount =
+        musicGain.gain.linearRampToValueAtTime.mock.calls.length
 
       const firstSource = context.bufferSources[0]!
       expect(output.playNarration('ramyeon')).toBe(true)
       expect(firstSource.stop).toHaveBeenCalledOnce()
       firstSource.finish()
-      expect(output.musicDucked).toBe(true)
+      expect(output.musicDucked).toBe(false)
 
       const secondSource = context.bufferSources[1]!
       secondSource.finish()
       expect(output.narrationPlaying).toBe(false)
       expect(output.musicDucked).toBe(false)
-      expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(
-        MUSIC_BUS_GAIN,
-        context.currentTime + 0.12,
-      )
+      expect(
+        musicGain.gain.linearRampToValueAtTime,
+      ).toHaveBeenCalledTimes(sidechainRampCallCount)
     } finally {
       output.destroy()
       vi.useRealTimers()
