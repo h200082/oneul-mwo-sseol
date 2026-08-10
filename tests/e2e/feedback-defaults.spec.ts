@@ -44,14 +44,6 @@ test('첫 실행은 효과음·BGM·진동·나레이션이 모두 켜지고 일
     'aria-pressed',
     'true',
   )
-  await expect(page.getByTestId('narration-toggle')).toHaveAttribute(
-    'aria-pressed',
-    'true',
-  )
-  await expect(page.getByTestId('narration-toggle')).toHaveAttribute(
-    'data-effective',
-    'true',
-  )
 
   expect(await readFeedbackState(page)).toMatchObject({
     sensoryFeedback: {
@@ -106,10 +98,6 @@ test('사용자가 명시적으로 끈 설정은 새로고침 뒤에도 다시 �
     'aria-pressed',
     'false',
   )
-  await expect(page.getByTestId('narration-toggle')).toHaveAttribute(
-    'aria-pressed',
-    'false',
-  )
   expect(await readFeedbackState(page)).toMatchObject({
     sensoryFeedback: {
       soundEnabled: false,
@@ -128,10 +116,6 @@ test('사용자가 명시적으로 끈 설정은 새로고침 뒤에도 다시 �
     'false',
   )
   await expect(page.getByTestId('haptics-toggle')).toHaveAttribute(
-    'aria-pressed',
-    'false',
-  )
-  await expect(page.getByTestId('narration-toggle')).toHaveAttribute(
     'aria-pressed',
     'false',
   )

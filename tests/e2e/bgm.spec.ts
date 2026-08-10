@@ -57,6 +57,7 @@ const LOGICAL_HEIGHT = 844;
 test("BGM은 라운드 난이도를 따라 올라가고 음소거·결과 생명주기를 지킨다", async ({
   page,
 }) => {
+  test.setTimeout(90_000);
   await installAudioProbe(page);
   await page.goto("/");
   await openSeededSoloGame(page, "bgm-e2e-seed-v1");

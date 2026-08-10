@@ -14,7 +14,7 @@ export interface ArcadeBgmEvent {
   readonly gain: number
 }
 
-export const ARCADE_BGM_BPM = 128
+export const ARCADE_BGM_BPM = 120
 export const ARCADE_BGM_STEPS_PER_BEAT = 4
 export const ARCADE_BGM_LOOP_STEPS = 64
 export const ARCADE_BGM_STEP_SECONDS =
@@ -29,54 +29,35 @@ export const ARCADE_BGM_INTENSITIES: readonly MusicIntensity[] = Object.freeze([
 
 type ArcadeBgmScore = readonly (readonly Readonly<ArcadeBgmEvent>[])[]
 
-// An original four-bar pattern built only from the G-major pentatonic notes
-// G, A, B, D, and E. Each later score keeps every earlier voice and adds one
-// rhythmic layer, so game intensity can rise without changing the clock.
-const BASS_MIDI = [55, 55, 52, 52, 47, 47, 50, 50] as const
-const PLUCK_MIDI = [
-  67, 71, 74, 71,
-  64, 67, 71, 74,
-  59, 62, 67, 71,
-  62, 69, 71, 74,
-] as const
-const ROTATION_ECHO_MIDI = [
-  74, 71, 76, 74,
-  71, 74, 76, 79,
-  62, 67, 71, 74,
-  69, 71, 74, 79,
-] as const
-const FINAL_FIVE_LEAD_MIDI = [
-  79, 81, 83, 86, 83, 81, 79, 74,
-  76, 79, 81, 83, 86, 83, 81, 76,
-  71, 74, 79, 81, 83, 86, 83, 79,
-  74, 76, 79, 81, 83, 81, 79, 74,
-] as const
-const FINAL_TWO_DRIVE_MIDI = [
-  79, 83, 86, 83, 81, 83, 86, 88,
-  76, 79, 83, 86, 88, 86, 83, 79,
-  71, 74, 79, 83, 86, 83, 79, 74,
-  74, 81, 83, 86, 88, 86, 83, 81,
-] as const
+// An original four-bar kitchen-arcade loop using only the G-major pentatonic
+// notes G, A, B, D, and E. Every onset occupies its own score step and stays
+// below 400 Hz, leaving the bright range open for slicing, capture, and voice.
+// Later phases add short syncopated pickups instead of stacking higher leads.
+const BASS_MIDI = [55, 50, 52, 50, 52, 50, 50, 55] as const
+const PLUCK_MIDI = [62, 67, 64, 59, 62, 67, 57, 62] as const
+const ROTATION_PULSE_MIDI = [59, 62, 57, 59, 62, 64, 59, 57] as const
+const FINAL_FIVE_CHOP_MIDI = [62, 59, 64, 62, 59, 57, 62, 64] as const
+const FINAL_TWO_SYNC_MIDI = [59, 62, 57, 59, 62, 64, 59, 57] as const
 
-const BASS_EVENTS = createVoice(BASS_MIDI, 'triangle', 6, 0.055)
-const PLUCK_EVENTS = createVoice(PLUCK_MIDI, 'square', 2, 0.032)
-const ROTATION_ECHO_EVENTS = createVoice(
-  ROTATION_ECHO_MIDI,
+const BASS_EVENTS = createVoice(BASS_MIDI, 'triangle', 3, 0.044)
+const PLUCK_EVENTS = createVoice(PLUCK_MIDI, 'square', 2, 0.012)
+const ROTATION_PULSE_EVENTS = createVoice(
+  ROTATION_PULSE_MIDI,
   'sine',
   1,
-  0.022,
+  0.01,
 )
-const FINAL_FIVE_LEAD_EVENTS = createVoice(
-  FINAL_FIVE_LEAD_MIDI,
-  'square',
-  1,
-  0.016,
-)
-const FINAL_TWO_DRIVE_EVENTS = createVoice(
-  FINAL_TWO_DRIVE_MIDI,
+const FINAL_FIVE_CHOP_EVENTS = createVoice(
+  FINAL_FIVE_CHOP_MIDI,
   'triangle',
   1,
-  0.014,
+  0.008,
+)
+const FINAL_TWO_SYNC_EVENTS = createVoice(
+  FINAL_TWO_SYNC_MIDI,
+  'square',
+  1,
+  0.006,
 )
 
 const SCORE_BY_INTENSITY: Readonly<Record<MusicIntensity, ArcadeBgmScore>> =
@@ -125,17 +106,17 @@ function createScore(highestLayer: 0 | 1 | 2 | 3): ArcadeBgmScore {
     if (step % 8 === 0) {
       events.push(BASS_EVENTS[step / 8]!)
     }
-    if (step % 4 === 0) {
-      events.push(PLUCK_EVENTS[step / 4]!)
+    if (step % 8 === 4) {
+      events.push(PLUCK_EVENTS[(step - 4) / 8]!)
     }
-    if (highestLayer >= 1 && step % 4 === 2) {
-      events.push(ROTATION_ECHO_EVENTS[(step - 2) / 4]!)
+    if (highestLayer >= 1 && step % 8 === 6) {
+      events.push(ROTATION_PULSE_EVENTS[(step - 6) / 8]!)
     }
-    if (highestLayer >= 2 && step % 2 === 1) {
-      events.push(FINAL_FIVE_LEAD_EVENTS[(step - 1) / 2]!)
+    if (highestLayer >= 2 && step % 8 === 2) {
+      events.push(FINAL_FIVE_CHOP_EVENTS[(step - 2) / 8]!)
     }
-    if (highestLayer >= 3 && step % 2 === 0) {
-      events.push(FINAL_TWO_DRIVE_EVENTS[step / 2]!)
+    if (highestLayer >= 3 && step % 8 === 3) {
+      events.push(FINAL_TWO_SYNC_EVENTS[(step - 3) / 8]!)
     }
 
     return Object.freeze(events)

@@ -447,10 +447,14 @@ const PRIMED_GESTURE_MAX_MS = 2_500
 const MUSIC_SCHEDULER_INTERVAL_MS = 90
 const MUSIC_SCHEDULE_AHEAD_SECONDS = 0.32
 const MUSIC_SCHEDULE_MAX_STEPS = 8
-const MUSIC_BUS_GAIN = 0.26
-const MUSIC_DUCKED_BUS_GAIN = 0.13
+const MUSIC_BUS_GAIN = 0.18
+const MUSIC_DUCKED_BUS_GAIN = 0.06
 const MUSIC_DUCK_ATTACK_SECONDS = 0.045
 const MUSIC_DUCK_RELEASE_SECONDS = 0.12
+const MUSIC_EFFECT_DUCKED_BUS_GAIN = 0.09
+const MUSIC_EFFECT_DUCK_ATTACK_SECONDS = 0.008
+const MUSIC_EFFECT_DUCK_HOLD_SECONDS = 0.035
+const MUSIC_EFFECT_DUCK_RELEASE_SECONDS = 0.2
 const NARRATION_BUS_GAIN = 0.9
 export const NARRATION_INITIAL_ROUND_PRELOAD_COUNT = 5
 export const NARRATION_PRELOAD_CONCURRENCY = 3
@@ -541,6 +545,7 @@ export class BrowserSensoryFeedbackOutput
   private activeNarration: ActiveNarrationSource | null = null
   private narrationGeneration = 0
   private musicDuckedState = false
+  private musicEffectDuckUntil = 0
   private destroyed = false
 
   constructor(
@@ -1309,7 +1314,89 @@ export class BrowserSensoryFeedbackOutput
       return
     }
     this.musicDuckedState = false
+    const context = this.context
+    const musicGain = this.musicGain
+    if (
+      context &&
+      musicGain &&
+      context.state === 'running' &&
+      this.musicEffectDuckUntil > context.currentTime
+    ) {
+      try {
+        const parameter = musicGain.gain
+        this.cancelMusicBusAutomation(
+          parameter,
+          context,
+          MUSIC_DUCKED_BUS_GAIN,
+        )
+        parameter.setValueAtTime(
+          MUSIC_DUCKED_BUS_GAIN,
+          this.musicEffectDuckUntil,
+        )
+        parameter.linearRampToValueAtTime(
+          MUSIC_BUS_GAIN,
+          this.musicEffectDuckUntil + MUSIC_EFFECT_DUCK_RELEASE_SECONDS,
+        )
+        return
+      } catch {
+        // Fall through to the normal narration release below.
+      }
+    }
     this.setMusicBusGain(MUSIC_BUS_GAIN, MUSIC_DUCK_RELEASE_SECONDS)
+  }
+
+  private duckMusicForEffect(
+    tones: readonly Readonly<SensoryTone>[],
+  ): void {
+    const context = this.context
+    const musicGain = this.musicGain
+    if (
+      !context ||
+      !musicGain ||
+      context.state !== 'running' ||
+      tones.length === 0
+    ) {
+      return
+    }
+
+    const effectTailSeconds = Math.max(
+      ...tones.map(
+        (toneSpec) =>
+          (toneSpec.startMs + toneSpec.durationMs) / 1_000,
+      ),
+    )
+    this.musicEffectDuckUntil = Math.max(
+      this.musicEffectDuckUntil,
+      context.currentTime +
+        0.005 +
+        effectTailSeconds +
+        MUSIC_EFFECT_DUCK_HOLD_SECONDS,
+    )
+
+    // Narration already owns the lower-priority music mix. Its restoration
+    // path observes musicEffectDuckUntil if the voice ends during this cue.
+    if (this.activeNarration !== null) {
+      return
+    }
+
+    try {
+      const parameter = musicGain.gain
+      this.cancelMusicBusAutomation(parameter, context, MUSIC_BUS_GAIN)
+      parameter.linearRampToValueAtTime(
+        MUSIC_EFFECT_DUCKED_BUS_GAIN,
+        context.currentTime + MUSIC_EFFECT_DUCK_ATTACK_SECONDS,
+      )
+      parameter.setValueAtTime(
+        MUSIC_EFFECT_DUCKED_BUS_GAIN,
+        this.musicEffectDuckUntil,
+      )
+      parameter.linearRampToValueAtTime(
+        MUSIC_BUS_GAIN,
+        this.musicEffectDuckUntil + MUSIC_EFFECT_DUCK_RELEASE_SECONDS,
+      )
+    } catch {
+      // Optional music ducking must never suppress the effect itself.
+    }
   }
 
   private setMusicBusGain(target: number, rampSeconds: number): boolean {
@@ -1321,16 +1408,7 @@ export class BrowserSensoryFeedbackOutput
 
     try {
       const parameter = musicGain.gain
-      const cancelScheduledValues = (
-        parameter as AudioParam & {
-          cancelScheduledValues?: (startTime: number) => AudioParam
-        }
-      ).cancelScheduledValues
-      cancelScheduledValues?.call(parameter, context.currentTime)
-      const currentValue = Number.isFinite(parameter.value)
-        ? Math.max(0.0001, parameter.value)
-        : MUSIC_BUS_GAIN
-      parameter.setValueAtTime(currentValue, context.currentTime)
+      this.cancelMusicBusAutomation(parameter, context, MUSIC_BUS_GAIN)
       parameter.linearRampToValueAtTime(
         target,
         context.currentTime + rampSeconds,
@@ -1339,6 +1417,27 @@ export class BrowserSensoryFeedbackOutput
     } catch {
       return false
     }
+  }
+
+  private cancelMusicBusAutomation(
+    parameter: AudioParam,
+    context: AudioContext,
+    fallbackValue: number,
+  ): void {
+    const cancellable = parameter as AudioParam & {
+      cancelAndHoldAtTime?: (cancelTime: number) => AudioParam
+      cancelScheduledValues?: (startTime: number) => AudioParam
+    }
+    if (typeof cancellable.cancelAndHoldAtTime === 'function') {
+      cancellable.cancelAndHoldAtTime(context.currentTime)
+      return
+    }
+
+    cancellable.cancelScheduledValues?.(context.currentTime)
+    const currentValue = Number.isFinite(parameter.value)
+      ? Math.max(0.0001, parameter.value)
+      : fallbackValue
+    parameter.setValueAtTime(currentValue, context.currentTime)
   }
 
   private pauseMusic(): void {
@@ -1372,6 +1471,7 @@ export class BrowserSensoryFeedbackOutput
     }
     this.musicGain = null
     this.musicDuckedState = false
+    this.musicEffectDuckUntil = 0
     this.musicStepIndex = 0
     this.musicNextStepAt = 0
   }
@@ -1613,6 +1713,9 @@ export class BrowserSensoryFeedbackOutput
           }
         }
       }
+    }
+    if (played) {
+      this.duckMusicForEffect(tones)
     }
     return played
   }

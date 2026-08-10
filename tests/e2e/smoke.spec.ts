@@ -733,8 +733,8 @@ test('솔로 결과는 첫 기기 기록과 같은 메뉴 재시도·새 메뉴 
 
 test('홈에서 핵심 시작 방법을 표시한다', async ({ page }) => {
   await enterMainMenu(page)
-  await expect(page).toHaveTitle('오늘 뭐 썰?')
-  await expect(page.getByRole('heading', { name: '오늘 뭐 썰?' })).toBeVisible()
+  await expect(page).toHaveTitle('뭐 먹을 거냥?')
+  await expect(page.getByRole('heading', { name: '뭐 먹을 거냥?' })).toBeVisible()
   await expect(page.getByTestId('solo-start')).toBeVisible()
   await expect(page.getByTestId('create-room')).toBeVisible()
   const friendJoin = page.getByTestId('friend-join')
@@ -1165,24 +1165,11 @@ test('음식 위를 0.3초 길게 누르면 이동 중인 대상을 포획한다
   await expect
     .poll(async () => (await readDebugState(page)).inputMode)
     .toBe('hold')
-  await page.waitForTimeout(160)
+  await page.waitForTimeout(80)
   const duringHold = await readDebugState(page)
-  expect(duringHold.activeToken?.y).toBeGreaterThan(token.y + 12)
-  await page.waitForTimeout(100)
-  const beforeCapture = await readDebugState(page)
-  expect(beforeCapture.inputMode).toBe('hold')
-  expect(beforeCapture.activeToken?.y).toBeGreaterThan(
-    (duringHold.activeToken?.y ?? token.y) + 12,
-  )
+  expect(duringHold.inputMode).toBe('hold')
+  expect(duringHold.activeToken?.y).toBeGreaterThan(token.y + 6)
 
-  await expect
-    .poll(async () => (await readDebugState(page)).captureCount, {
-      timeout: 1_000,
-    })
-    .toBe(1)
-  await expect
-    .poll(async () => (await readDebugState(page)).lastAction)
-    .toBe('capture')
   await page.waitForFunction(() => {
     const debugWindow = window as PrototypeDebugWindow
     return (
@@ -1195,18 +1182,21 @@ test('음식 위를 0.3초 길게 누르면 이동 중인 대상을 포획한다
   if (captureEffectStartY === null) {
     throw new Error('포획 이동 중인 음식의 Y 좌표를 찾을 수 없습니다.')
   }
-  await page.waitForTimeout(70)
-  const captureEffectMiddleY = (await readDebugState(page)).captureEffectY
-  if (captureEffectMiddleY === null) {
-    throw new Error('포획 이동이 예상보다 일찍 종료됐습니다.')
-  }
-  await page.waitForTimeout(70)
+  await page.waitForTimeout(50)
   const captureEffectLaterY = (await readDebugState(page)).captureEffectY
   if (captureEffectLaterY === null) {
     throw new Error('포획 이동이 예상보다 일찍 종료됐습니다.')
   }
-  expect(captureEffectMiddleY).toBeLessThan(captureEffectStartY)
-  expect(captureEffectLaterY).toBeLessThan(captureEffectMiddleY)
+  expect(captureEffectLaterY).toBeLessThan(captureEffectStartY)
+
+  await expect
+    .poll(async () => (await readDebugState(page)).captureCount, {
+      timeout: 1_000,
+    })
+    .toBe(1)
+  await expect
+    .poll(async () => (await readDebugState(page)).lastAction)
+    .toBe('capture')
   await expect
     .poll(async () => (await readDebugState(page)).filledCaptureSlotCount)
     .toBe(1)

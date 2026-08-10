@@ -79,14 +79,6 @@ const ROOM_SYNC_SINGLE_PLAYER_RECONCILIATION_INTERVAL_MS = 5_000
 const ROOM_SYNC_DEGRADED_RECONCILIATION_INTERVAL_MS = 10_000
 const ROOM_SYNC_SERVER_READ_TIMEOUT_MS = 4_000
 const ROOM_SYNC_RETRY_DELAYS_MS = [500, 1_500, 3_000] as const
-const NARRATION_ICON_MARKUP = `
-  <span class="feedback-icon feedback-icon-narration" aria-hidden="true">
-    <svg viewBox="0 0 24 24" focusable="false">
-      <path d="M6 5h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7l-5 3v-3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" />
-      <path d="M8 9h8M8 12h5" />
-    </svg>
-  </span>
-`
 
 const MENU_BY_ID = new Map(MENU_CATALOG.map((menu) => [menu.id, menu]))
 
@@ -269,6 +261,7 @@ export class AppController {
     this.narrationPreference =
       options.narrationPreference ??
       createBrowserNarrationPreference(() => this.sensoryFeedback.soundEnabled)
+    this.narrationPreference.setEnabled(this.sensoryFeedback.soundEnabled)
     this.appRoot.addEventListener(
       'pointerdown',
       this.sensoryPointerDownHandler,
@@ -400,7 +393,7 @@ export class AppController {
 
         <header class="splash-heading">
           <p class="eyebrow">POP ARCADE MENU BATTLE</p>
-          <h1>오늘 뭐 <strong>썰?</strong></h1>
+          <h1>뭐 먹을 <strong>거냥?</strong></h1>
           <p>베고, 고르고, 오늘 메뉴 결정!</p>
         </header>
 
@@ -548,8 +541,13 @@ export class AppController {
   }
 
   setNarrationEnabled(enabled: boolean): void {
-    this.narrationPreference.setEnabled(enabled)
+    this.setUnifiedSoundEnabled(enabled)
     this.updateHomeFeedbackControls()
+  }
+
+  private setUnifiedSoundEnabled(enabled: boolean): void {
+    this.sensoryFeedback.setSoundEnabled(enabled)
+    this.narrationPreference.setEnabled(enabled)
   }
 
   subscribeNarrationPreference(
@@ -563,15 +561,11 @@ export class AppController {
       this.screenRoot.querySelector<HTMLButtonElement>(
         '[data-testid="sound-toggle"]',
       )
-    const narrationToggle =
-      this.screenRoot.querySelector<HTMLButtonElement>(
-        '[data-testid="narration-toggle"]',
-      )
     const hapticsToggle =
       this.screenRoot.querySelector<HTMLButtonElement>(
         '[data-testid="haptics-toggle"]',
       )
-    if (!soundToggle || !narrationToggle || !hapticsToggle) {
+    if (!soundToggle || !hapticsToggle) {
       return
     }
 
@@ -581,27 +575,10 @@ export class AppController {
     )
     soundToggle.setAttribute(
       'aria-label',
-      `효과음 ${this.sensoryFeedback.soundEnabled ? '끄기' : '켜기'}`,
+      `음향 ${this.sensoryFeedback.soundEnabled ? '끄기' : '켜기'}`,
     )
-    soundToggle.innerHTML = '<span aria-hidden="true">♪</span>'
-
-    const narrationState = this.narrationPreference.getState()
-    narrationToggle.setAttribute(
-      'aria-pressed',
-      String(narrationState.requestedEnabled),
-    )
-    narrationToggle.setAttribute(
-      'aria-label',
-      `나레이션 ${narrationState.requestedEnabled ? '끄기' : '켜기'}`,
-    )
-    narrationToggle.dataset.effective = String(
-      narrationState.effectiveEnabled,
-    )
-    narrationToggle.title =
-      narrationState.requestedEnabled && !narrationState.effectiveEnabled
-        ? '효과음을 켜면 나레이션이 재생돼요'
-        : ''
-    narrationToggle.innerHTML = NARRATION_ICON_MARKUP
+    soundToggle.innerHTML =
+      '<span class="feedback-toggle-copy" aria-hidden="true">SOUND</span>'
 
     const hapticsAvailable = this.sensoryFeedback.hapticsSupported
     hapticsToggle.disabled = !hapticsAvailable
@@ -617,7 +594,8 @@ export class AppController {
         ? `진동 ${this.sensoryFeedback.hapticsEnabled ? '끄기' : '켜기'}`
         : '이 기기에서는 진동을 지원하지 않아요',
     )
-    hapticsToggle.innerHTML = '<span aria-hidden="true">≋</span>'
+    hapticsToggle.innerHTML =
+      '<span class="feedback-toggle-copy" aria-hidden="true">VIB</span>'
   }
 
   private renderHome(invitedRoomCode: string | null = null): void {
@@ -639,11 +617,19 @@ export class AppController {
           ${isInviteMode ? 'data-testid="invite-home"' : ''}
         >
           <p class="eyebrow">POP ARCADE MENU BATTLE</p>
-          <h1>오늘 뭐 썰?</h1>
+          <h1>뭐 먹을 거냥?</h1>
           <p class="brand-copy">
             먹고 싶은 메뉴는 포획하고<br />
             나머지는 정확히 반으로 썰어보세요.
           </p>
+          <img
+            class="screen-chef-cat home-chef-cat"
+            data-testid="home-chef-cat"
+            src="${chefCatImageUrl}"
+            alt=""
+            aria-hidden="true"
+            draggable="false"
+          />
           <div
             class="feedback-settings"
             data-testid="feedback-settings"
@@ -655,25 +641,9 @@ export class AppController {
               type="button"
               data-testid="sound-toggle"
               aria-pressed="${this.sensoryFeedback.soundEnabled ? 'true' : 'false'}"
-              aria-label="효과음 ${this.sensoryFeedback.soundEnabled ? '끄기' : '켜기'}"
+              aria-label="음향 ${this.sensoryFeedback.soundEnabled ? '끄기' : '켜기'}"
             >
-              <span aria-hidden="true">♪</span>
-            </button>
-            <button
-              class="feedback-toggle feedback-toggle-narration"
-              type="button"
-              data-testid="narration-toggle"
-              aria-pressed="${this.narrationPreference.requestedEnabled ? 'true' : 'false'}"
-              aria-label="나레이션 ${this.narrationPreference.requestedEnabled ? '끄기' : '켜기'}"
-              data-effective="${this.narrationPreference.effectiveEnabled ? 'true' : 'false'}"
-              title="${
-                this.narrationPreference.requestedEnabled &&
-                !this.narrationPreference.effectiveEnabled
-                  ? '효과음을 켜면 나레이션이 재생돼요'
-                  : ''
-              }"
-            >
-              ${NARRATION_ICON_MARKUP}
+              <span class="feedback-toggle-copy" aria-hidden="true">SOUND</span>
             </button>
             <button
               class="feedback-toggle"
@@ -692,7 +662,7 @@ export class AppController {
               }"
               ${this.sensoryFeedback.hapticsSupported ? '' : 'disabled'}
             >
-              <span aria-hidden="true">≋</span>
+              <span class="feedback-toggle-copy" aria-hidden="true">VIB</span>
             </button>
           </div>
         </header>
@@ -834,10 +804,10 @@ export class AppController {
         <p class="prototype-note" data-testid="backend-note">
           ${
             this.backend === 'local'
-              ? `현재 방 연결은 같은 브라우저의 여러 탭에서 검증하는 로컬 시제품입니다.
-                실제 휴대폰 간 연결은 Firebase 설정 후 활성화됩니다.`
-              : `Firebase 실시간 방 연결이 활성화되어 있습니다.
-                초대 링크나 QR로 다른 기기에서도 참가할 수 있습니다.`
+              ? `연습 식탁 모드예요. 같은 브라우저의 새 탭을 친구 자리처럼 열어
+                함께 메뉴를 골라볼 수 있어요.`
+              : `친구 식탁이 열렸어요. 초대 링크나 QR을 보내
+                다른 기기에서도 함께 메뉴를 골라보세요.`
           }
         </p>
         <p class="form-status" role="status" data-testid="home-status"></p>
@@ -852,7 +822,7 @@ export class AppController {
       'click',
       () => {
         const enabled = !this.sensoryFeedback.soundEnabled
-        this.sensoryFeedback.setSoundEnabled(enabled)
+        this.setUnifiedSoundEnabled(enabled)
         this.updateHomeFeedbackControls()
         if (enabled) {
           void this.sensoryFeedback.unlock().then((unlocked) => {
@@ -863,11 +833,6 @@ export class AppController {
         }
       },
     )
-    this.query<HTMLButtonElement>(
-      '[data-testid="narration-toggle"]',
-    ).addEventListener('click', () => {
-      this.setNarrationEnabled(!this.narrationPreference.requestedEnabled)
-    })
     this.query<HTMLButtonElement>(
       '[data-testid="haptics-toggle"]',
     ).addEventListener('click', () => {
@@ -1206,13 +1171,17 @@ export class AppController {
             aria-label="홈으로 돌아가기"
           >←</button>
           <div>
-            <p class="eyebrow">${
-              this.backend === 'local'
-                ? 'LOCAL ROOM PROTOTYPE'
-                : 'FIREBASE LIVE ROOM'
-            }</p>
+            <p class="eyebrow">FRIENDS' TABLE · ${initialRoom.code}</p>
             <h1>친구를 초대하세요</h1>
           </div>
+          <img
+            class="screen-chef-cat lobby-chef-cat"
+            data-testid="lobby-chef-cat"
+            src="${chefCatImageUrl}"
+            alt=""
+            aria-hidden="true"
+            draggable="false"
+          />
         </header>
 
         <section class="invite-card">
@@ -2894,6 +2863,7 @@ export class AppController {
             src="${chefCatImageUrl}"
             alt=""
             aria-hidden="true"
+            draggable="false"
           />
           <p class="eyebrow">DINNER TABLE READY</p>
           <h1>친구들의 한 끼를 차리는 중</h1>
@@ -3104,7 +3074,14 @@ export class AppController {
             src="${chefCatImageUrl}"
             alt=""
             aria-hidden="true"
+            draggable="false"
           />
+          <div
+            class="result-hero-pick"
+            data-testid="result-hero-pick"
+            aria-hidden="true"
+            hidden
+          ></div>
           <div class="result-celebration-copy">
             <span>MENU CHAMPION</span>
             <h2 data-testid="result-celebration-title"></h2>
@@ -3151,7 +3128,7 @@ export class AppController {
         >
           <span>이 기기 최고 기록</span>
           <strong>${personalBest ? `${formatScore(personalBest.score)}점` : '첫 기록 대기 중'}</strong>
-          <small>모드와 식사 시간별로 이 기기에만 저장돼요.</small>
+          <small>다음 한 끼에서 셰프의 기록을 갈아치워 보세요.</small>
         </section>
 
         <section class="result-section standings-section">
@@ -3189,7 +3166,18 @@ export class AppController {
     const heroScore = this.query<HTMLElement>(
       '[data-testid="result-celebration-score"]',
     )
+    const heroPick = this.query<HTMLElement>(
+      '[data-testid="result-hero-pick"]',
+    )
     const winner = summary.winners[0]
+    const heroMenuId = winner?.capturedMenuSlots.find(
+      (menuId) => menuId !== null,
+    )
+
+    if (heroMenuId !== undefined && heroMenuId !== null) {
+      heroPick.hidden = false
+      heroPick.append(this.createResultMenuSlot(heroMenuId))
+    }
 
     if (winner === undefined) {
       heroTitle.textContent = '오늘의 도전 완료!'
@@ -3485,7 +3473,7 @@ export class AppController {
     this.screenRoot.innerHTML = `
       <div class="app-screen results-waiting-screen">
         <header class="results-heading">
-          <p class="eyebrow">RESULT ERROR</p>
+          <p class="eyebrow">TABLE PAUSED</p>
           <h1>공동 결과를 열 수 없어요</h1>
           <p data-testid="result-fatal-error"></p>
         </header>
@@ -3522,7 +3510,7 @@ export class AppController {
     try {
       if (navigator.share) {
         await navigator.share({
-          title: '오늘 뭐 썰? 방 초대',
+          title: '뭐 먹을 거냥? 방 초대',
           text: '같이 메뉴를 포획하고 식사 내기를 해요.',
           url: inviteUrl,
         })

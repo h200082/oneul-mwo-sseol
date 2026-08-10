@@ -33,7 +33,7 @@ test('일반 첫 접속은 타이틀을 보여주고 게임 시작 뒤 기존 �
   const splash = page.getByTestId('splash-screen')
   await expect(splash).toBeVisible()
   await expect(
-    splash.getByRole('heading', { level: 1, name: '오늘 뭐 썰?' }),
+    splash.getByRole('heading', { level: 1, name: '뭐 먹을 거냥?' }),
   ).toBeVisible()
   await expect(page.getByTestId('splash-chef-cat')).toBeVisible()
   await expect(page.getByTestId('splash-food')).toHaveCount(4)
@@ -160,7 +160,7 @@ test('모바일 첫 화면은 가로 넘침 없이 제목과 시작 버튼을 �
 
   const start = page.getByTestId('splash-start')
   await expect(
-    page.getByRole('heading', { level: 1, name: '오늘 뭐 썰?' }),
+    page.getByRole('heading', { level: 1, name: '뭐 먹을 거냥?' }),
   ).toBeInViewport()
   await expect(page.getByTestId('splash-chef-cat')).toBeInViewport()
   await expect(start).toBeInViewport()

@@ -159,7 +159,7 @@ test('밝은 타이틀과 우상단 피드백 설정은 320px 화면에서도 �
     homeBox.x + homeBox.width + 1,
   )
 
-  for (const testId of ['sound-toggle', 'narration-toggle', 'haptics-toggle']) {
+  for (const testId of ['sound-toggle', 'haptics-toggle']) {
     const control = page.getByTestId(testId)
     const box = await requiredBox(control)
     expect(box.width).toBeGreaterThanOrEqual(44)
@@ -170,6 +170,7 @@ test('밝은 타이틀과 우상단 피드백 설정은 320px 화면에서도 �
   }
 
   const sound = page.getByTestId('sound-toggle')
+  const haptics = page.getByTestId('haptics-toggle')
   const soundPressedBefore = await sound.getAttribute('aria-pressed')
   await sound.tap()
   await expect(sound).toHaveAttribute(
@@ -180,14 +181,14 @@ test('밝은 타이틀과 우상단 피드백 설정은 320px 화면에서도 �
   expect(soundBoxAfterToggle.width).toBeLessThanOrEqual(52)
   expect(soundBoxAfterToggle.height).toBeLessThanOrEqual(52)
   await expect(sound).not.toContainText('효과음')
+  await expect(sound).toHaveText('SOUND')
+  await expect(haptics).toHaveText('VIB')
 
   await expect(sound).toHaveAccessibleName(
-    /^효과음 (끄기|켜기)$/u,
+    /^음향 (끄기|켜기)$/u,
   )
-  await expect(page.getByTestId('narration-toggle')).toHaveAccessibleName(
-    /^나레이션 (끄기|켜기)$/u,
-  )
-  await expect(page.getByTestId('haptics-toggle')).toHaveAccessibleName(
+  await expect(page.getByTestId('narration-toggle')).toHaveCount(0)
+  await expect(haptics).toHaveAccessibleName(
     /^(진동 (끄기|켜기)|이 기기에서는 진동을 지원하지 않아요)$/u,
   )
   expect(

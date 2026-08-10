@@ -1,11 +1,11 @@
 # AI 활용 기술 문서
 
 > 작성 기준일: 2026-08-10
-> 대상 프로젝트: **오늘 뭐 썰?** 실제 음식 알파 실루엣 베기·음식 이미지 50종·AI 합성 나레이션 활성 50종·모바일 멀티플레이 프로토타입
+> 대상 프로젝트: **뭐 먹을 거냥?** 실제 음식 알파 실루엣 베기·음식 이미지 50종·AI 합성 나레이션 활성 50종·모바일 멀티플레이 프로토타입
 
 ## 1. 프로젝트 및 AI 활용 개요
 
-- 게임 제목: 오늘 뭐 썰?
+- 게임 제목: 뭐 먹을 거냥?
 - AI 활용 목적: 기획 구체화, 웹 프로젝트 구성, 핵심 알고리즘 구현 보조, 테스트 설계, 제출 문서화
 - 핵심 활용 영역: 게임 규칙 정리, 음식 이미지 50종 생성·교정·투명 WebP 후처리, 실제 음식 알파 실루엣 기반 완화 베기·길게 누르기 포획 판정, 덱 20종 선로딩, 홈의 별도 비채점 베기·포획 튜토리얼, 이동 중 입력과 모바일 취소 처리, 첫 실행 ON·명시적 OFF 저장을 적용한 효과음·BGM·진동·나레이션 설정, 음식별 나레이션 문구 50종·고양이 말풍선·사전 생성 AI 합성 음성 활성 50종, 방·대기실 규칙, QR 초대·스캔 흐름, 로컬 멀티탭과 Firebase 실제 기기용 동기화, 공동 결과 집계, 보안 규칙 테스트, 브라우저 테스트, GitHub Pages 배포 준비
 
@@ -35,7 +35,7 @@ Azure 음성 모델과 정확한 voice ID는 위 표에 확정 기록했다. Cod
 | Firebase 백엔드 | `src/firebase/`, `firestore.rules` | 익명 인증 `uid`, Firestore 트랜잭션, 방·결과 실시간 구독, 허용 필드·상태 전이 보안 규칙 | 로컬 게이트웨이와 같은 계약을 유지하고 에뮬레이터에서 권한 경계를 검토 |
 | 공동 결과 | `src/domain/roomResults.ts`, `src/domain/roomResultResolution.ts`, `src/app/AppController.ts` | 전원 결과 조기 공개, 서버가 180초+5초를 확인한 뒤 미제출 DNF, 0점 완주 우선, 1~8등·공동 순위, 포획 카드, 최다 중복 메뉴 | 실시간 스냅샷은 pending만 갱신하고 서버 권위 결과에서만 DNF가 생기는지 단위·Rules·두 클라이언트 E2E로 테스트 |
 | QR 초대 | `src/rooms/roomInvite.ts`, `src/qr/QrScannerService.ts` | 실제 QR 생성, 초대 URL 파싱, `BarcodeDetector` 스캔과 링크·코드 대체 | 미지원·권한 거부·시간 초과 오류와 정규화 경로 검토 |
-| 음식 나레이션 | `src/data/menuNarrations.ts`, `src/data/menuNarrationAudioManifest.ts`, `src/assets/narration/`, `src/feedback/SensoryFeedback.ts` | 음식 50종 자막·활성 MP3·WAV 50종, 첫 실행 ON·명시적 OFF 저장, 사운드 마스터 연동, 현재 덱 음원만 선로딩, 한 번에 하나만 재생, 재생 중 BGM -6dB duck, 게임 방법 AI 합성 음성 고지 | Haena·Junho Flash/Full 후보를 사람이 청취해 활성 50종을 선정하고 historical 3종을 보존; 저장된 OFF가 재실행 뒤 유지되는지와 source/target hash, 로드·디코딩 실패 fallback, 오래된 비동기 로드 차단, 키·SDK·런타임 Azure 호출 없음과 비성대모사를 검토 |
+| 음식 나레이션 | `src/data/menuNarrations.ts`, `src/data/menuNarrationAudioManifest.ts`, `src/assets/narration/`, `src/feedback/SensoryFeedback.ts` | 음식 50종 자막·활성 MP3·WAV 50종, 첫 실행 ON·명시적 OFF 저장, 사운드 마스터 연동, 현재 덱 음원만 선로딩, 한 번에 하나만 재생, 재생 중 BGM 약 -9.5dB duck·효과음 순간 약 -6dB sidechain, 게임 방법 AI 합성 음성 고지 | Haena·Junho Flash/Full 후보를 사람이 청취해 활성 50종을 선정하고 historical 3종을 보존; 저장된 OFF가 재실행 뒤 유지되는지와 source/target hash, 로드·디코딩 실패 fallback, 오래된 비동기 로드 차단, 키·SDK·런타임 Azure 호출 없음과 비성대모사를 검토 |
 | 자동 검증 | `tests/`, `playwright.config.ts`, `firebase.json` | 단위 테스트, Firestore Rules 통합 테스트, 데스크톱·모바일 브라우저 검사 | 실패 원인을 확인하고 구현·규칙 또는 테스트 좌표를 수정 |
 | 배포 | `.github/workflows/deploy-pages.yml` | 테스트·빌드 후 `dist/`를 Pages에 게시 | 공개 저장소 연결 후 실제 URL과 접근 권한을 사람이 최종 확인 |
 

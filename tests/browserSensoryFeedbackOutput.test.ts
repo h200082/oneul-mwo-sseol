@@ -518,6 +518,55 @@ describe('BrowserSensoryFeedbackOutput', () => {
     }
   })
 
+  it('sidechains music under effects and extends the release for a newer cue', async () => {
+    vi.useFakeTimers()
+    const { harness, output } = createOutput()
+
+    try {
+      await expect(output.unlock()).resolves.toBe(true)
+      expect(output.startMusic('opening')).toBe(true)
+      const context = harness.contexts[0]!
+      const musicGain = context.gains[1]!
+
+      expect(output.play([FIRST_TONE], 1)).toBe(true)
+      expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(
+        0.09,
+        context.currentTime + 0.008,
+      )
+      const firstDuckHold =
+        musicGain.gain.setValueAtTime.mock.calls.at(-1)
+      expect(firstDuckHold?.[0]).toBe(0.09)
+      expect(firstDuckHold?.[1]).toBeCloseTo(
+        context.currentTime + 0.12,
+        12,
+      )
+      const firstDuckRelease =
+        musicGain.gain.linearRampToValueAtTime.mock.calls.at(-1)
+      expect(firstDuckRelease?.[0]).toBe(0.18)
+      expect(firstDuckRelease?.[1]).toBeCloseTo(
+        context.currentTime + 0.32,
+        12,
+      )
+      const firstEffectGain = context.gains.at(-1)!
+      expect(firstEffectGain.gain.linearRampToValueAtTime)
+        .toHaveBeenCalledWith(FIRST_TONE.gain, 0.017)
+
+      context.currentTime = 0.04
+      expect(output.play(LATEST_TONES, 1)).toBe(true)
+      const extendedDuckHold =
+        musicGain.gain.setValueAtTime.mock.calls.at(-1)
+      expect(extendedDuckHold?.[0]).toBe(0.09)
+      expect(extendedDuckHold?.[1]).toBeCloseTo(0.19, 12)
+      const extendedDuckRelease =
+        musicGain.gain.linearRampToValueAtTime.mock.calls.at(-1)
+      expect(extendedDuckRelease?.[0]).toBe(0.18)
+      expect(extendedDuckRelease?.[1]).toBeCloseTo(0.39, 12)
+    } finally {
+      output.destroy()
+      vi.useRealTimers()
+    }
+  })
+
   it('stops only music while leaving an active sound effect intact', async () => {
     vi.useFakeTimers()
     const { harness, output } = createOutput()
@@ -788,7 +837,7 @@ describe('BrowserSensoryFeedbackOutput', () => {
       expect(output.narrationPlaying).toBe(true)
       expect(output.musicDucked).toBe(true)
       expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(
-        0.13,
+        0.06,
         context.currentTime + 0.045,
       )
 
@@ -803,7 +852,7 @@ describe('BrowserSensoryFeedbackOutput', () => {
       expect(output.narrationPlaying).toBe(false)
       expect(output.musicDucked).toBe(false)
       expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(
-        0.26,
+        0.18,
         context.currentTime + 0.12,
       )
     } finally {

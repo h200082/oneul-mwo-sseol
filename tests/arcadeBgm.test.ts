@@ -16,11 +16,11 @@ const LEGAL_WAVES = new Set(['sine', 'square', 'triangle', 'sawtooth'])
 const G_MAJOR_PENTATONIC_PITCH_CLASSES = new Set([2, 4, 7, 9, 11])
 
 describe('arcade BGM score', () => {
-  it('uses a 128 BPM, four-bar 16th-note clock', () => {
-    expect(ARCADE_BGM_BPM).toBe(128)
+  it('uses a 120 BPM, four-bar 16th-note clock', () => {
+    expect(ARCADE_BGM_BPM).toBe(120)
     expect(ARCADE_BGM_STEPS_PER_BEAT).toBe(4)
     expect(ARCADE_BGM_LOOP_STEPS).toBe(64)
-    expect(ARCADE_BGM_STEP_SECONDS).toBeCloseTo(60 / 128 / 4, 12)
+    expect(ARCADE_BGM_STEP_SECONDS).toBeCloseTo(60 / 120 / 4, 12)
   })
 
   it('is exactly periodic over all 64 steps in either direction', () => {
@@ -72,7 +72,7 @@ describe('arcade BGM score', () => {
     ]
     const totals = intensityOrder.map((intensity) => eventCount(intensity))
 
-    expect(totals).toEqual([24, 40, 72, 104])
+    expect(totals).toEqual([16, 24, 32, 40])
     expect(
       allEvents('opening').some((event) => event.wave === 'triangle'),
     ).toBe(true)
@@ -89,6 +89,24 @@ describe('arcade BGM score', () => {
         expect(laterEvents.slice(0, earlierEvents.length)).toEqual(earlierEvents)
       }
     }
+  })
+
+  it('leaves bright effect space and never starts stacked notes', () => {
+    for (const intensity of ARCADE_BGM_INTENSITIES) {
+      for (let step = 0; step < ARCADE_BGM_LOOP_STEPS; step += 1) {
+        const events = getArcadeBgmEvents(step, intensity)
+        expect(events).toHaveLength(events.length > 0 ? 1 : 0)
+        expect(
+          events.reduce((total, event) => total + event.gain, 0),
+        ).toBeLessThanOrEqual(0.044)
+      }
+    }
+
+    expect(
+      Math.max(
+        ...allEvents('final-two').map((event) => event.frequency),
+      ),
+    ).toBeLessThanOrEqual(392.01)
   })
 
   it('keeps the bass audible on small mobile speakers', () => {
