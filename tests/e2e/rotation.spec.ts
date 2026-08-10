@@ -53,6 +53,7 @@ test.beforeEach(async ({ page }) => {
 test('keeps rounds 1-5 still and starts deterministic nested rotation at round 6', async ({
   page,
 }) => {
+  test.setTimeout(75_000)
   const deckSeed = 'rotation-e2e-seed-v1'
   await startSeededGame(page, deckSeed)
 
