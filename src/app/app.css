@@ -868,25 +868,6 @@
   line-height: 1;
 }
 
-.feedback-icon {
-  display: inline-flex;
-  width: 20px;
-  height: 20px;
-  align-items: center;
-  justify-content: center;
-}
-
-.feedback-icon > svg {
-  display: block;
-  width: 100%;
-  height: 100%;
-  fill: none;
-  stroke: currentcolor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 1.8;
-}
-
 .setup-card,
 .join-card,
 .invite-card,
@@ -1388,12 +1369,9 @@
   color: #0b746c;
 }
 
-.home-screen
-  .feedback-toggle-narration[aria-pressed='true'][data-effective='false'] {
-  border-color: #cabda9;
-  border-style: dashed;
-  background: #fff9ee;
-  color: #776f64;
+.home-screen .feedback-toggle > span.feedback-toggle-copy:first-child {
+  font-size: 9px;
+  letter-spacing: 0.04em;
 }
 
 .home-screen .feedback-toggle:disabled {
@@ -3251,5 +3229,220 @@
   .result-actions .button,
   .result-home-button {
     min-height: 48px;
+  }
+}
+/* Character polish for the bright menu-table screens. */
+.home-screen .brand-block {
+  min-height: 148px;
+}
+
+.home-screen .brand-copy {
+  max-width: calc(100% - 92px);
+}
+
+:is(.home-chef-cat, .lobby-chef-cat) {
+  position: absolute;
+  filter: drop-shadow(0 10px 11px rgb(52 75 87 / 20%));
+  transform-origin: 50% 88%;
+  animation: result-waiting-cat-bob 4.2s ease-in-out infinite;
+}
+
+.home-chef-cat {
+  right: 3px;
+  bottom: -4px;
+  width: 82px;
+}
+
+.lobby-heading {
+  position: relative;
+  min-height: 72px;
+  padding-right: 62px;
+}
+
+.lobby-heading > div {
+  min-width: 0;
+}
+
+.lobby-chef-cat {
+  right: 1px;
+  bottom: -2px;
+  width: 56px;
+}
+
+:is(.home-screen, .lobby-screen, .results-waiting-screen, .room-results-screen)
+  :is(.button, .icon-button, .feedback-toggle) {
+  touch-action: manipulation;
+  transition:
+    transform 120ms ease,
+    filter 120ms ease,
+    box-shadow 120ms ease;
+}
+
+:is(.home-screen, .lobby-screen, .results-waiting-screen, .room-results-screen)
+  :is(
+    .button:not(:disabled),
+    .icon-button:not(:disabled),
+    .feedback-toggle:not(:disabled)
+  ):active {
+  box-shadow: inset 0 3px 6px rgb(36 52 71 / 18%);
+  filter: brightness(0.97);
+  transform: translateY(2px) scale(0.985);
+}
+
+.result-celebration-copy {
+  padding-right: 68px;
+}
+
+.result-hero-pick[hidden] {
+  display: none;
+}
+
+.result-hero-pick {
+  position: absolute;
+  z-index: 3;
+  right: 10px;
+  bottom: 12px;
+  width: 66px;
+  transform: rotate(4deg);
+}
+
+.room-results-screen .result-hero-pick .result-menu-art {
+  overflow: visible;
+  width: 64px;
+  border: 0;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none;
+}
+
+.room-results-screen .result-hero-pick .result-menu-art img {
+  padding: 0;
+  border-radius: 0;
+  filter:
+    drop-shadow(0 2px 0 rgb(255 253 248 / 88%))
+    drop-shadow(0 9px 7px rgb(52 75 87 / 24%));
+}
+
+.room-results-screen .result-hero-pick small {
+  width: auto;
+  border-radius: 999px;
+  background: rgb(255 253 248 / 92%);
+  padding: 2px 6px;
+  color: #8a5800;
+}
+
+.room-results-screen .result-personal-best {
+  position: relative;
+  border-color: #dfc86f;
+  background:
+    linear-gradient(135deg, rgb(244 201 93 / 22%), transparent 65%),
+    #fffdf8;
+  padding-left: 58px;
+  box-shadow: 0 12px 26px rgb(113 87 28 / 12%);
+}
+
+.room-results-screen .result-personal-best::before {
+  position: absolute;
+  top: 50%;
+  left: 13px;
+  display: grid;
+  width: 34px;
+  aspect-ratio: 1;
+  place-items: center;
+  border-radius: 50%;
+  background: #f4c95d;
+  box-shadow: inset 0 0 0 1px #d9a329;
+  color: #8a5800;
+  content: '★';
+  font-size: 17px;
+  transform: translateY(-50%);
+}
+
+.room-results-screen .result-personal-best > span {
+  color: #8a5800;
+  font-weight: 950;
+}
+
+.room-results-screen .result-personal-best > strong {
+  font-size: 23px;
+}
+
+@media (max-width: 390px) {
+  .home-chef-cat {
+    width: 74px;
+  }
+
+  .lobby-heading {
+    padding-right: 56px;
+  }
+
+  .lobby-chef-cat {
+    width: 50px;
+  }
+
+  .result-celebration-copy {
+    padding-right: 57px;
+  }
+
+  .result-hero-pick {
+    right: 7px;
+    width: 56px;
+  }
+
+  .room-results-screen .result-hero-pick .result-menu-art {
+    width: 54px;
+  }
+}
+
+@media (max-width: 320px) {
+  .home-screen .brand-copy {
+    max-width: calc(100% - 66px);
+  }
+
+  .home-chef-cat {
+    right: 1px;
+    bottom: 0;
+    width: 59px;
+  }
+
+  .lobby-heading {
+    padding-right: 47px;
+  }
+
+  .lobby-chef-cat {
+    width: 42px;
+  }
+
+  .room-results-screen .result-personal-best {
+    grid-template-columns: minmax(0, 1fr);
+    padding-left: 52px;
+  }
+
+  .room-results-screen .result-personal-best > strong {
+    text-align: left;
+  }
+
+  .room-results-screen .result-personal-best > small {
+    grid-column: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce), (update: slow) {
+  :is(.home-chef-cat, .lobby-chef-cat) {
+    animation: none;
+  }
+
+  :is(.home-screen, .lobby-screen, .results-waiting-screen, .room-results-screen)
+    :is(.button, .icon-button, .feedback-toggle) {
+    transition: none;
+  }
+
+  :is(.home-screen, .lobby-screen, .results-waiting-screen, .room-results-screen)
+    :is(
+      .button:not(:disabled),
+      .icon-button:not(:disabled),
+      .feedback-toggle:not(:disabled)
+    ):active {
+    transform: none;
   }
 }

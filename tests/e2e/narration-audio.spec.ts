@@ -7,6 +7,7 @@ import { enterMainMenu } from './appEntry'
 const APPROVED_AUDIO_IDS = new Set<string>(MENU_NARRATION_AUDIO_IDS)
 
 interface SensoryDebugState {
+  readonly soundEnabled: boolean
   readonly audioState: 'unavailable' | 'locked' | 'running' | 'suspended' | 'closed'
   readonly musicPlaying: boolean
   readonly narrationPreparedCount: number
@@ -341,7 +342,7 @@ test('일반 베기·포획·놓침은 음성을 유지한 채 정확히 1.5초 
   })
 })
 
-test('VOX를 끄면 재생 중 음성을 멈추되 현재 음식 말풍선은 유지한다', async ({
+test('SOUND를 끄면 재생 중 음성과 음악을 멈추되 현재 음식 말풍선은 유지한다', async ({
   page,
 }) => {
   await installNarrationAudioProbe(page)
@@ -356,11 +357,17 @@ test('VOX를 끄면 재생 중 음성을 멈추되 현재 음식 말풍선은 �
 
   const before = await readGameDebug(page)
   expect(before.narration.captionVisible).toBe(true)
-  await page.evaluate(() => {
-    const app = (window as NarrationDebugWindow).__NHN_APP__
-    if (!app) throw new Error('앱 디버그 상태를 찾을 수 없습니다.')
-    app.setNarrationEnabled(false)
-  })
+  const canvasBox = await page.locator('#game-root canvas').boundingBox()
+  if (!canvasBox) {
+    throw new Error('게임 캔버스 위치를 찾을 수 없습니다.')
+  }
+  await page.mouse.click(
+    canvasBox.x + 317 * (canvasBox.width / 390),
+    canvasBox.y + 44 * (canvasBox.height / 844),
+  )
+  await expect
+    .poll(async () => (await readSensoryDebug(page)).soundEnabled)
+    .toBe(false)
 
   const after = await readGameDebug(page)
   expect(after.narration).toMatchObject({
@@ -372,9 +379,10 @@ test('VOX를 끄면 재생 중 음성을 멈추되 현재 음식 말풍선은 �
     audioStarted: false,
   })
   expect(after.sensoryFeedback).toMatchObject({
+    soundEnabled: false,
     narrationPlaying: false,
     musicDucked: false,
-    musicPlaying: true,
+    musicPlaying: false,
   })
   expect((await readNarrationProbe(page)).bufferStops).toBe(1)
 })

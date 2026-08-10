@@ -87,7 +87,7 @@ const FINAL_TWO_ROUND_INDEX = 18
 const TOKEN_LABEL_HALF_WIDTH = 64
 const TOKEN_HORIZONTAL_EDGE_PADDING = 18
 const HUD_SCORE_CENTER_X = 170
-const ACCURACY_POPUP_MIN_Y = 232
+const ACCURACY_POPUP_MIN_Y = 170
 const ROOM_SOUND_SCALE = 0.86
 const NARRATION_CAPTION_VISIBLE_MS = 1_400
 const NARRATION_CAPTION_FADE_MS = 180
@@ -160,6 +160,7 @@ interface HoldCaptureState {
 interface CaptureSlot {
   readonly center: Point
   readonly numberLabel: Phaser.GameObjects.Text
+  readonly pulseRing: Phaser.GameObjects.Arc
   filled: boolean
 }
 
@@ -181,6 +182,11 @@ export class PrototypeScene extends Phaser.Scene {
   private captureText!: Phaser.GameObjects.Text
   private feedbackText!: Phaser.GameObjects.Text
   private missWarningLine: Phaser.GameObjects.Rectangle | null = null
+  private ambientStreakGlow: Phaser.GameObjects.Ellipse | null = null
+  private finalSprintTint: Phaser.GameObjects.Ellipse | null = null
+  private boardCaptureGlow: Phaser.GameObjects.Ellipse | null = null
+  private musicVisualizerBars: Phaser.GameObjects.Rectangle[] = []
+  private arenaVisualStage: 0 | 1 | 2 = 0
   private introOverlay: Phaser.GameObjects.Container | null = null
   private introTimer: Phaser.Time.TimerEvent | null = null
   private narrationCaption: Phaser.GameObjects.Container | null = null
@@ -188,7 +194,6 @@ export class PrototypeScene extends Phaser.Scene {
   private chefMascot: Phaser.GameObjects.Image | null = null
   private narrationCaptionTimer: Phaser.Time.TimerEvent | null = null
   private narrationPreferenceUnsubscribe: (() => void) | null = null
-  private narrationControlSync: (() => void) | null = null
   private narrationCaptionGeneration = 0
   private narrationMenuId: string | null = null
   private narrationText: string | null = null
@@ -350,12 +355,16 @@ export class PrototypeScene extends Phaser.Scene {
     this.chefMascot = null
     this.narrationCaptionTimer = null
     this.narrationPreferenceUnsubscribe = null
-    this.narrationControlSync = null
     this.narrationCaptionGeneration = 0
     this.narrationMenuId = null
     this.narrationText = null
     this.narrationAudioStarted = false
     this.missWarningLine = null
+    this.ambientStreakGlow = null
+    this.finalSprintTint = null
+    this.boardCaptureGlow = null
+    this.musicVisualizerBars = []
+    this.arenaVisualStage = 0
     this.captureSlots = []
     this.filledCaptureSlotCount = 0
     this.lastSliceAngleDegrees = null
@@ -665,46 +674,88 @@ export class PrototypeScene extends Phaser.Scene {
 
   private drawArena(): void {
     const background = this.add.graphics()
-    background.fillStyle(0x101821, 1)
+    background.fillStyle(0x160f18, 1)
     background.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT)
 
-    background.fillStyle(0x5a403a, 0.92)
+    background.fillStyle(0x2b1823, 0.98)
+    background.fillRect(0, 80, LOGICAL_WIDTH, 250)
+    background.fillStyle(0x5a2f38, 0.26)
+    background.fillRect(0, 80, LOGICAL_WIDTH, 74)
+
+    background.fillStyle(0x51342f, 0.98)
     background.fillRoundedRect(10, 84, LOGICAL_WIDTH - 20, 744, 36)
 
-    background.fillStyle(0x151f2b, 1)
+    background.fillStyle(0x21131b, 1)
     background.fillRoundedRect(25, 136, LOGICAL_WIDTH - 50, 624, 30)
 
-    background.lineStyle(3, 0xffd76a, 0.76)
+    background.lineStyle(3, 0xd9b77b, 0.62)
     background.strokeRoundedRect(25, 136, LOGICAL_WIDTH - 50, 624, 30)
-    background.lineStyle(1, 0x55e6d1, 0.24)
+    background.lineStyle(1, 0xfff0d2, 0.16)
     background.strokeRoundedRect(32, 143, LOGICAL_WIDTH - 64, 610, 25)
 
-    background.fillStyle(0x55e6d1, 0.035)
-    background.fillEllipse(LOGICAL_WIDTH / 2, 405, 302, 500)
-    background.fillStyle(0xffd76a, 0.035)
-    background.fillEllipse(LOGICAL_WIDTH / 2, 372, 220, 366)
-    background.lineStyle(1, 0x55e6d1, 0.1)
-    background.strokeEllipse(LOGICAL_WIDTH / 2, 396, 264, 444)
-    background.lineStyle(1, 0xffd76a, 0.09)
-    background.strokeEllipse(LOGICAL_WIDTH / 2, 396, 188, 330)
-
-    background.fillStyle(0x55e6d1, 0.45)
-    for (const [x, y, radius] of [
-      [48, 188, 2],
-      [336, 224, 2],
-      [57, 418, 1.5],
-      [326, 492, 1.5],
-      [82, 632, 2],
-      [305, 652, 2],
-    ] as const) {
-      background.fillCircle(x, y, radius)
+    background.lineStyle(1, 0xc79b91, 0.06)
+    for (let row = 0; row < 8; row += 1) {
+      const tileY = 154 + row * 54
+      background.lineBetween(36, tileY, LOGICAL_WIDTH - 36, tileY)
+      const offset = row % 2 === 0 ? 0 : 27
+      for (let tileX = 36 + offset; tileX < LOGICAL_WIDTH - 36; tileX += 54) {
+        background.lineBetween(tileX, tileY, tileX, tileY + 54)
+      }
     }
 
-    background.lineStyle(3, 0xffd76a, 0.9)
-    background.beginPath()
-    background.moveTo(42, MISS_LINE_Y)
-    background.lineTo(LOGICAL_WIDTH - 42, MISS_LINE_Y)
-    background.strokePath()
+    background.fillStyle(0xffd9a3, 0.022)
+    background.fillTriangle(104, 146, 44, 566, 210, 566)
+    background.fillStyle(0x55e6d1, 0.018)
+    background.fillTriangle(296, 146, 184, 566, 356, 566)
+
+    background.fillStyle(0x120b10, 0.56)
+    background.fillRoundedRect(45, 553, 310, 142, 30)
+    background.fillStyle(0x6a4637, 0.98)
+    background.fillRoundedRect(45, 545, 310, 142, 30)
+    background.lineStyle(2, 0xe6c38f, 0.5)
+    background.strokeRoundedRect(45, 545, 310, 142, 30)
+    background.lineStyle(1, 0xffecd0, 0.15)
+    background.strokeRoundedRect(56, 556, 288, 120, 24)
+    background.lineStyle(1, 0x2a1d1d, 0.2)
+    for (const boardY of [579, 610, 641] as const) {
+      background.lineBetween(72, boardY, 326, boardY + 4)
+    }
+    background.fillStyle(0x2a171b, 0.72)
+    background.fillCircle(326, 568, 7)
+    background.lineStyle(1, 0xffe4b1, 0.36)
+    background.strokeCircle(326, 568, 7)
+
+    background.fillStyle(0x24151c, 0.94)
+    background.fillRoundedRect(38, MISS_LINE_Y - 9, LOGICAL_WIDTH - 76, 18, 9)
+    background.lineStyle(1, 0xff795f, 0.52)
+    background.strokeRoundedRect(38, MISS_LINE_Y - 9, LOGICAL_WIDTH - 76, 18, 9)
+    background.lineStyle(2, 0xffd79a, 0.76)
+    for (let markerX = 50; markerX < LOGICAL_WIDTH - 50; markerX += 24) {
+      background.lineBetween(markerX, MISS_LINE_Y, markerX + 12, MISS_LINE_Y)
+    }
+    background.fillStyle(0xff795f, 0.88)
+    background.fillCircle(42, MISS_LINE_Y, 3)
+    background.fillCircle(LOGICAL_WIDTH - 42, MISS_LINE_Y, 3)
+
+    background.fillStyle(0x24151c, 0.98)
+    background.fillRoundedRect(8, 15, 236, 62, 18)
+    background.lineStyle(1, 0xffefd2, 0.34)
+    background.strokeRoundedRect(8, 15, 236, 62, 18)
+    background.fillStyle(0xffd76a, 0.88)
+    background.fillCircle(235, 28, 3)
+
+    this.ambientStreakGlow = this.add
+      .ellipse(LOGICAL_WIDTH / 2, 440, 304, 520, 0x55e6d1, 1)
+      .setAlpha(0)
+      .setDepth(1)
+    this.finalSprintTint = this.add
+      .ellipse(LOGICAL_WIDTH / 2, 440, 326, 560, 0xffc46b, 1)
+      .setAlpha(0)
+      .setDepth(2)
+    this.boardCaptureGlow = this.add
+      .ellipse(LOGICAL_WIDTH / 2, 616, 286, 112, 0xffd76a, 1)
+      .setAlpha(0)
+      .setDepth(3)
 
     this.missWarningLine = this.add
       .rectangle(
@@ -719,60 +770,134 @@ export class PrototypeScene extends Phaser.Scene {
       .setDepth(4)
 
     this.add
-      .text(137, 44, '오늘 뭐 썰?', {
+      .text(137, 44, '뭐 먹을 거냥?', {
         color: '#fff8e7',
         fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
         fontSize: '25px',
         fontStyle: 'bold',
-        stroke: '#101821',
+        stroke: '#24151c',
         strokeThickness: 3,
       })
       .setOrigin(0.5)
+      .setDepth(12)
 
     this.add
-      .rectangle(LOGICAL_WIDTH / 2, 786, 326, 36, 0x0c141f, 0.82)
+      .text(137, 66, 'DAWN DINER  ·  SLICE SERVICE', {
+        color: '#d5bfa9',
+        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+        fontSize: '9px',
+        fontStyle: 'bold',
+        letterSpacing: 1.4,
+      })
+      .setOrigin(0.5)
+      .setDepth(12)
+
+    this.musicVisualizerBars = [7, 12, 9, 16].map((height, index) =>
+      this.add
+        .rectangle(213 + index * 8, 67, 4, height, 0x55e6d1, 0.34)
+        .setOrigin(0.5, 1)
+        .setDepth(12),
+    )
+
+    this.add
+      .text(LOGICAL_WIDTH / 2, MISS_LINE_Y - 18, '주방 마감선  ·  MISS', {
+        color: '#e9cfaa',
+        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+        fontSize: '10px',
+        fontStyle: 'bold',
+        letterSpacing: 1,
+      })
+      .setOrigin(0.5)
+      .setDepth(2)
+
+    this.add
+      .rectangle(LOGICAL_WIDTH / 2, 786, 326, 36, 0x24151c, 0.9)
       .setStrokeStyle(1, 0x55e6d1, 0.34)
 
     this.add
       .text(LOGICAL_WIDTH / 2, 786, '꾹 눌러 찜하기  ·  휙 그어 썰기', {
-        color: '#dce8ef',
+        color: '#d7e1e8',
         fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
         fontSize: '15px',
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
+      .setDepth(2)
   }
 
   private createHud(): void {
-    this.progressText = this.add.text(46, 103, '', {
+    const hudRail = this.add.graphics().setDepth(10)
+    hudRail.fillStyle(0x24151c, 0.96)
+    hudRail.fillRoundedRect(36, 91, 336, 44, 14)
+    hudRail.lineStyle(1, 0xffe2b3, 0.28)
+    hudRail.strokeRoundedRect(36, 91, 336, 44, 14)
+    hudRail.lineStyle(1, 0xc9a99d, 0.22)
+    hudRail.lineBetween(104, 99, 104, 127)
+    hudRail.lineBetween(254, 99, 254, 127)
+    hudRail.lineStyle(2, 0x55e6d1, 0.72)
+    hudRail.lineBetween(112, 132, 228, 132)
+
+    this.add
+      .text(46, 95, 'ROUND', {
+        color: '#8398aa',
+        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+        fontSize: '8px',
+        fontStyle: 'bold',
+        letterSpacing: 1.2,
+      })
+      .setDepth(12)
+    this.add
+      .text(HUD_SCORE_CENTER_X, 95, 'SLICE AVERAGE', {
+        color: '#8398aa',
+        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+        fontSize: '8px',
+        fontStyle: 'bold',
+        letterSpacing: 1,
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(12)
+    this.add
+      .text(296, 95, 'KEEP', {
+        color: '#a99068',
+        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+        fontSize: '8px',
+        fontStyle: 'bold',
+        letterSpacing: 1.2,
+      })
+      .setOrigin(1, 0)
+      .setDepth(12)
+
+    this.progressText = this.add.text(46, 106, '', {
       color: '#fff8e7',
       fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
-      fontSize: '16px',
+      fontSize: '17px',
       fontStyle: 'bold',
-    })
+    }).setDepth(12)
 
     this.scoreText = this.add
-      .text(HUD_SCORE_CENTER_X, 103, '', {
+      .text(HUD_SCORE_CENTER_X, 106, '', {
         color: '#55e6d1',
         fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
-        fontSize: '16px',
+        fontSize: '15px',
         fontStyle: 'bold',
       })
       .setOrigin(0.5, 0)
+      .setDepth(12)
 
     this.captureText = this.add
-      .text(296, 103, '', {
+      .text(296, 107, '', {
         color: '#ffd76a',
         fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
-        fontSize: '16px',
+        fontSize: '14px',
         fontStyle: 'bold',
       })
       .setOrigin(1, 0)
+      .setDepth(12)
 
     this.captureSlots = Array.from({ length: MAX_CAPTURES }, (_, index) => {
       const center = { x: 322 + index * 32, y: 113 }
-      this.add
-        .circle(center.x, center.y, 13, 0x17212d, 0.92)
+      const pulseRing = this.add
+        .circle(center.x, center.y, 13, 0x2a1820, 0.94)
         .setStrokeStyle(2, 0xffd76a, 0.7)
         .setDepth(11)
       const numberLabel = this.add
@@ -785,8 +910,16 @@ export class PrototypeScene extends Phaser.Scene {
         .setOrigin(0.5)
         .setDepth(12)
 
-      return { center, numberLabel, filled: false }
+      return { center, numberLabel, pulseRing, filled: false }
     })
+
+    this.add
+      .rectangle(LOGICAL_WIDTH / 2, 742, 338, 48, 0x24151c, 0.94)
+      .setStrokeStyle(1, 0xffe2b3, 0.24)
+      .setDepth(10)
+    this.add
+      .rectangle(LOGICAL_WIDTH / 2, 718, 92, 2, 0x55e6d1, 0.62)
+      .setDepth(11)
 
     this.feedbackText = this.add
       .text(LOGICAL_WIDTH / 2, 742, '첫 메뉴를 준비 중!', {
@@ -800,13 +933,14 @@ export class PrototypeScene extends Phaser.Scene {
         wordWrap: { width: 336, useAdvancedWrap: true },
       })
       .setOrigin(0.5)
+      .setDepth(12)
 
     this.createSensoryControls()
   }
 
   private createChefMascot(): void {
     this.add
-      .circle(29, 49, 27, 0x223245, 0.98)
+      .circle(29, 49, 27, 0x321d26, 0.98)
       .setStrokeStyle(2, 0xffd76a, 0.82)
       .setDepth(14)
     this.add.circle(29, 49, 22, 0x55e6d1, 0.1).setDepth(14)
@@ -852,35 +986,35 @@ export class PrototypeScene extends Phaser.Scene {
 
   private createNarrationCaption(): void {
     const bubble = this.add
-      .rectangle(177, 84, 246, 42, 0x243244, 0.97)
-      .setStrokeStyle(2, 0x55e6d1, 0.9)
-    const tail = this.add.triangle(
-      49,
-      84,
-      0,
-      0,
-      11,
-      -7,
-      11,
-      7,
-      0x243244,
-      0.97,
-    )
+      .rectangle(LOGICAL_WIDTH / 2, 742, 326, 42, 0x2f1b24, 0.98)
+      .setStrokeStyle(2, 0x55e6d1, 0.72)
+    const voiceTag = this.add
+      .rectangle(54, 742, 42, 22, 0x55e6d1, 0.14)
+      .setStrokeStyle(1, 0x55e6d1, 0.7)
+    const voiceTagCopy = this.add
+      .text(54, 742, 'VOX', {
+        color: '#7ef0df',
+        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
+        fontSize: '9px',
+        fontStyle: 'bold',
+        letterSpacing: 1,
+      })
+      .setOrigin(0.5)
     this.narrationCaptionText = this.add
-      .text(177, 84, '', {
+      .text(213, 742, '', {
         align: 'center',
         color: '#fff8e7',
         fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
-        fontSize: '13px',
+        fontSize: '12px',
         fontStyle: 'bold',
         lineSpacing: 1,
         maxLines: 2,
-        wordWrap: { width: 216, useAdvancedWrap: true },
+        wordWrap: { width: 270, useAdvancedWrap: true },
       })
       .setOrigin(0.5)
 
     this.narrationCaption = this.add
-      .container(0, 0, [tail, bubble, this.narrationCaptionText])
+      .container(0, 0, [bubble, voiceTag, voiceTagCopy, this.narrationCaptionText])
       .setDepth(18)
       .setAlpha(0)
       .setVisible(false)
@@ -894,7 +1028,6 @@ export class PrototypeScene extends Phaser.Scene {
           this.sensoryFeedback.stopNarration()
           this.narrationAudioStarted = false
         }
-        this.narrationControlSync?.()
       }) ?? null
   }
 
@@ -934,14 +1067,19 @@ export class PrototypeScene extends Phaser.Scene {
     this.narrationCaptionTimer = null
     this.tweens.killTweensOf(caption)
     captionText.setText(text)
-    caption.setVisible(true).setAlpha(0).setY(-7)
-    this.tweens.add({
-      targets: caption,
-      alpha: 1,
-      y: 0,
-      duration: 150,
-      ease: 'Back.Out',
-    })
+    this.feedbackText.setAlpha(0)
+    if (this.reducedMotion) {
+      caption.setVisible(true).setAlpha(1).setY(0)
+    } else {
+      caption.setVisible(true).setAlpha(0).setY(4)
+      this.tweens.add({
+        targets: caption,
+        alpha: 1,
+        y: 0,
+        duration: 150,
+        ease: 'Back.Out',
+      })
+    }
 
     this.narrationCaptionTimer = this.time.delayedCall(
       NARRATION_CAPTION_VISIBLE_MS,
@@ -953,15 +1091,21 @@ export class PrototypeScene extends Phaser.Scene {
           return
         }
         this.narrationCaptionTimer = null
+        if (this.reducedMotion) {
+          caption.setAlpha(0).setVisible(false).setY(0)
+          this.feedbackText.setAlpha(1)
+          return
+        }
         this.tweens.add({
           targets: caption,
           alpha: 0,
-          y: -5,
+          y: 3,
           duration: NARRATION_CAPTION_FADE_MS,
           ease: 'Quad.In',
           onComplete: () => {
             if (generation === this.narrationCaptionGeneration) {
               caption.setVisible(false).setY(0)
+              this.feedbackText.setAlpha(1)
             }
           },
         })
@@ -974,6 +1118,7 @@ export class PrototypeScene extends Phaser.Scene {
     this.narrationCaptionTimer?.remove(false)
     this.narrationCaptionTimer = null
     const caption = this.narrationCaption
+    this.feedbackText?.setAlpha(1)
     if (!caption) {
       return
     }
@@ -982,20 +1127,24 @@ export class PrototypeScene extends Phaser.Scene {
   }
   private createSensoryControls(): void {
     const hapticsSupported = this.sensoryFeedback.hapticsSupported
-    const hasNarrationControl = this.narrationPreference !== undefined
-    const narrationX = hapticsSupported ? 269 : 317
-    const soundX = hapticsSupported ? 317 : 365
     const buttonY = 44
+    const stopPropagation = (
+      _pointer: Phaser.Input.Pointer,
+      _localX: number,
+      _localY: number,
+      event: Phaser.Types.Input.EventData,
+    ): void => {
+      event.stopPropagation()
+    }
 
     const createToggle = (
       x: number,
       label: string,
       getEnabled: () => boolean,
       onToggle: () => void,
-      getMuted: () => boolean = () => false,
-    ): (() => void) => {
+    ): void => {
       const panel = this.add
-        .rectangle(x, buttonY, 44, 44, 0x1a2634, 0.94)
+        .rectangle(x, buttonY, 44, 44, 0x2a1921, 0.96)
         .setStrokeStyle(2, 0x52677d, 0.9)
         .setDepth(14)
         .setInteractive({ useHandCursor: true })
@@ -1003,7 +1152,7 @@ export class PrototypeScene extends Phaser.Scene {
         .text(x, buttonY, label, {
           color: '#91a2b4',
           fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
-          fontSize: label.length > 1 ? '10px' : '21px',
+          fontSize: label.length > 4 ? '9px' : '10px',
           fontStyle: 'bold',
         })
         .setOrigin(0.5)
@@ -1011,31 +1160,18 @@ export class PrototypeScene extends Phaser.Scene {
 
       const sync = (): void => {
         const enabled = getEnabled()
-        const muted = enabled && getMuted()
         panel
-          .setFillStyle(
-            muted ? 0x443a26 : enabled ? 0x1e4647 : 0x1a2634,
-            0.94,
-          )
+          .setFillStyle(enabled ? 0x214b47 : 0x2a1921, 0.94)
           .setStrokeStyle(
             2,
-            muted ? 0xffd76a : enabled ? 0x55e6d1 : 0x52677d,
+            enabled ? 0x55e6d1 : 0x52677d,
             0.9,
           )
         copy
-          .setText(muted ? `${label}\nMUTE` : label)
-          .setFontSize(muted ? 8 : label.length > 1 ? 10 : 21)
-          .setColor(muted ? '#ffd76a' : enabled ? '#7ef0df' : '#91a2b4')
+          .setText(label)
+          .setColor(enabled ? '#7ef0df' : '#91a2b4')
         panel.setAlpha(enabled ? 1 : 0.7)
         copy.setAlpha(enabled ? 1 : 0.7)
-      }
-      const stopPropagation = (
-        _pointer: Phaser.Input.Pointer,
-        _localX: number,
-        _localY: number,
-        event: Phaser.Types.Input.EventData,
-      ): void => {
-        event.stopPropagation()
       }
       panel.on(Phaser.Input.Events.POINTER_DOWN, stopPropagation)
       panel.on(
@@ -1052,43 +1188,23 @@ export class PrototypeScene extends Phaser.Scene {
         },
       )
       sync()
-      return sync
-    }
-
-    if (hasNarrationControl) {
-      this.narrationControlSync = createToggle(
-        narrationX,
-        'VOX',
-        () => this.narrationPreference?.requestedEnabled ?? false,
-        () => {
-          const enabled = this.narrationPreference?.toggle() ?? false
-          if (!this.narrationPreference?.effectiveEnabled) {
-            this.sensoryFeedback.stopNarration()
-            this.narrationAudioStarted = false
-          }
-          this.feedbackText
-            .setColor(enabled ? '#55e6d1' : '#b9c5d3')
-            .setText(`나레이션 ${enabled ? '켜짐' : '꺼짐'}`)
-        },
-        () =>
-          Boolean(
-            this.narrationPreference?.requestedEnabled &&
-              !this.narrationPreference.effectiveEnabled,
-          ),
-      )
     }
 
     createToggle(
-      soundX,
-      '♪',
+      317,
+      'SOUND',
       () => this.sensoryFeedback.soundEnabled,
       () => {
         const enabled = !this.sensoryFeedback.soundEnabled
         this.sensoryFeedback.setSoundEnabled(enabled)
-        this.narrationControlSync?.()
+        this.narrationPreference?.setEnabled(enabled)
+        if (!enabled) {
+          this.sensoryFeedback.stopNarration()
+          this.narrationAudioStarted = false
+        }
         this.feedbackText
           .setColor(enabled ? '#55e6d1' : '#b9c5d3')
-          .setText(`효과음 ${enabled ? '켜짐' : '꺼짐'}`)
+          .setText(`음향 ${enabled ? '켜짐' : '꺼짐'}`)
         if (enabled) {
           void this.sensoryFeedback.unlock().then((unlocked) => {
             if (unlocked) {
@@ -1099,20 +1215,24 @@ export class PrototypeScene extends Phaser.Scene {
       },
     )
 
-    if (hapticsSupported) {
-      createToggle(
-        365,
-        'VIB',
-        () => this.sensoryFeedback.hapticsEnabled,
-        () => {
-          const enabled = !this.sensoryFeedback.hapticsEnabled
-          this.sensoryFeedback.setHapticsEnabled(enabled)
+    createToggle(
+      365,
+      'VIB',
+      () => hapticsSupported && this.sensoryFeedback.hapticsEnabled,
+      () => {
+        if (!hapticsSupported) {
           this.feedbackText
-            .setColor(enabled ? '#55e6d1' : '#b9c5d3')
-            .setText(`진동 ${enabled ? '켜짐' : '꺼짐'}`)
-        },
-      )
-    }
+            .setColor('#b9c5d3')
+            .setText('이 기기에서는 진동을 지원하지 않아요')
+          return
+        }
+        const enabled = !this.sensoryFeedback.hapticsEnabled
+        this.sensoryFeedback.setHapticsEnabled(enabled)
+        this.feedbackText
+          .setColor(enabled ? '#55e6d1' : '#b9c5d3')
+          .setText(`진동 ${enabled ? '켜짐' : '꺼짐'}`)
+      },
+    )
   }
   private triggerSensory(cue: SensoryCue): void {
     this.sensoryFeedback.trigger(
@@ -1411,6 +1531,7 @@ export class PrototypeScene extends Phaser.Scene {
 
     if (!isPractice) {
       this.sensoryFeedback.startMusic(getRoundMusicIntensity(roundIndex))
+      this.updateArenaVisualStage(roundIndex)
     }
 
     if (
@@ -1571,6 +1692,99 @@ export class PrototypeScene extends Phaser.Scene {
     this.updateHud()
   }
 
+  private updateArenaVisualStage(roundIndex: number): void {
+    const nextStage: 0 | 1 | 2 =
+      roundIndex >= FINAL_TWO_ROUND_INDEX
+        ? 2
+        : roundIndex >= FINAL_SPRINT_ROUND_INDEX
+          ? 1
+          : 0
+    if (nextStage === this.arenaVisualStage) {
+      return
+    }
+    this.arenaVisualStage = nextStage
+
+    const tint = this.finalSprintTint
+    if (tint) {
+      const tintColor = nextStage === 2 ? 0xff795f : 0xffc46b
+      const targetAlpha = nextStage === 2 ? 0.078 : nextStage === 1 ? 0.05 : 0
+      this.tweens.killTweensOf(tint)
+      tint.setFillStyle(tintColor, 1)
+      if (this.reducedMotion) {
+        tint.setAlpha(targetAlpha)
+      } else {
+        this.tweens.add({
+          targets: tint,
+          alpha: targetAlpha,
+          duration: 420,
+          ease: 'Sine.Out',
+        })
+      }
+    }
+
+    const barColor =
+      nextStage === 2 ? 0xff795f : nextStage === 1 ? 0xffd76a : 0x55e6d1
+    this.musicVisualizerBars.forEach((bar, index) => {
+      this.tweens.killTweensOf(bar)
+      bar
+        .setFillStyle(barColor, 1)
+        .setAlpha(nextStage === 0 ? 0.34 : nextStage === 1 ? 0.66 : 0.8)
+        .setScale(1)
+      if (nextStage > 0 && !this.reducedMotion) {
+        this.tweens.add({
+          targets: bar,
+          scaleY: 1.18 + index * 0.07,
+          alpha: nextStage === 2 ? 0.48 : 0.42,
+          delay: index * 55,
+          duration: 310 + index * 45,
+          ease: 'Sine.InOut',
+          yoyo: true,
+          repeat: -1,
+        })
+      }
+    })
+  }
+
+  private updateSliceStreakLighting(streak: number): void {
+    const glow = this.ambientStreakGlow
+    if (!glow) {
+      return
+    }
+    const targetAlpha =
+      streak >= 8 ? 0.09 : streak >= 5 ? 0.06 : streak >= 3 ? 0.034 : 0
+    const color = streak >= 5 ? 0xffd76a : 0x55e6d1
+    this.tweens.killTweensOf(glow)
+    glow.setFillStyle(color, 1)
+    if (this.reducedMotion) {
+      glow.setAlpha(targetAlpha)
+    } else {
+      this.tweens.add({
+        targets: glow,
+        alpha: targetAlpha,
+        duration: 260,
+        ease: 'Sine.Out',
+      })
+    }
+  }
+
+  private stopArenaVisualEffects(): void {
+    const ambientEffects = [
+      this.ambientStreakGlow,
+      this.finalSprintTint,
+      this.boardCaptureGlow,
+    ].filter(
+      (effect): effect is Phaser.GameObjects.Ellipse => effect !== null,
+    )
+    for (const effect of ambientEffects) {
+      this.tweens.killTweensOf(effect)
+      effect.setAlpha(0)
+    }
+    for (const bar of this.musicVisualizerBars) {
+      this.tweens.killTweensOf(bar)
+      bar.setAlpha(0).setScale(1)
+    }
+  }
+
   private getSafeHorizontalAmplitude(
     baseX: number,
     horizontalSafetyRadius: number,
@@ -1656,14 +1870,14 @@ export class PrototypeScene extends Phaser.Scene {
       )
       const labelWidth = Phaser.Math.Clamp(86 + menu.nameKo.length * 8, 110, 128)
       const labelPlate = this.add
-        .rectangle(0, labelY, labelWidth, 30, 0x243244, 0.96)
-        .setStrokeStyle(2, 0x55e6d1, 0.82)
+        .rectangle(0, labelY, labelWidth, 28, 0xfff0cf, 0.98)
+        .setStrokeStyle(2, 0x8f5b44, 0.92)
       const label = this.add
         .text(0, labelY, menu.nameKo, {
           align: 'center',
-          color: '#fff8e7',
+          color: '#3a2021',
           fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
-          fontSize: '15px',
+          fontSize: '14px',
           fontStyle: 'bold',
         })
         .setOrigin(0.5)
@@ -2003,7 +2217,6 @@ export class PrototypeScene extends Phaser.Scene {
     this.hideNarrationCaption()
     this.narrationPreferenceUnsubscribe?.()
     this.narrationPreferenceUnsubscribe = null
-    this.narrationControlSync = null
     this.clearGestureTimeout()
     this.cancelHoldCapture()
     this.introTimer?.remove(false)
@@ -2255,6 +2468,7 @@ export class PrototypeScene extends Phaser.Scene {
       this.currentSliceStreak += 1
     } else if (action.type === 'miss') {
       this.currentSliceStreak = 0
+      this.updateSliceStreakLighting(0)
     }
     const reachedSliceStreakMilestone =
       action.type === 'slice' &&
@@ -2294,7 +2508,14 @@ export class PrototypeScene extends Phaser.Scene {
         .setText(
           sliceFeedback.label + ' ' + roundedScore.toFixed(1) + '%',
         )
-      this.showChefReaction(sliceFeedback.label, sliceProfile.flashColor)
+      this.showChefReaction(
+        sliceFeedback.label,
+        sliceFeedback.level === 'perfect'
+          ? 0xffd76a
+          : sliceFeedback.level === 'needs-practice'
+            ? 0xff795f
+            : 0x55e6d1,
+      )
       this.playSliceResolution(
         token,
         decision,
@@ -2447,6 +2668,7 @@ export class PrototypeScene extends Phaser.Scene {
       this.rounds.filter((round) => round.action.type === 'capture').length - 1
     const slot = this.captureSlots[captureIndex]
     const target = slot?.center ?? { x: LOGICAL_WIDTH - 42, y: 113 }
+    this.pulseCaptureStage(slot)
 
     this.activeCaptureEffect = token.container
     this.tweens.add({
@@ -2507,13 +2729,63 @@ export class PrototypeScene extends Phaser.Scene {
     })
   }
 
+  private pulseCaptureStage(slot: CaptureSlot | undefined): void {
+    const glow = this.boardCaptureGlow
+    if (glow) {
+      this.tweens.killTweensOf(glow)
+      glow.setAlpha(this.reducedMotion ? 0.12 : 0.22)
+      if (this.reducedMotion) {
+        this.time.delayedCall(120, () => glow.setAlpha(0))
+      } else {
+        this.tweens.add({
+          targets: glow,
+          alpha: 0,
+          duration: CAPTURE_EFFECT_DURATION_MS + 40,
+          ease: 'Quad.Out',
+        })
+      }
+    }
+    if (!slot) {
+      return
+    }
+
+    const ring = slot.pulseRing
+    this.tweens.killTweensOf(ring)
+    ring
+      .setAlpha(1)
+      .setScale(1)
+      .setFillStyle(0xffd76a, 0.22)
+      .setStrokeStyle(4, 0xffd76a, 1)
+    const restoreRing = (): void => {
+      ring
+        .setAlpha(1)
+        .setScale(1)
+        .setFillStyle(0x2a1820, 0.94)
+        .setStrokeStyle(2, 0xffd76a, 0.7)
+    }
+    if (this.reducedMotion) {
+      this.time.delayedCall(120, restoreRing)
+      return
+    }
+    this.tweens.add({
+      targets: ring,
+      scale: 1.22,
+      alpha: 0.72,
+      duration: CAPTURE_EFFECT_DURATION_MS / 2,
+      yoyo: true,
+      ease: 'Sine.InOut',
+      onComplete: restoreRing,
+    })
+  }
+
   private showSliceStreak(streak: number): void {
     this.lastAnnouncedSliceStreak = streak
     this.activeSliceStreakBanner = streak
+    this.updateSliceStreakLighting(streak)
     const accentColor =
-      streak >= 8 ? 0xff795f : streak >= 5 ? 0xffd76a : 0x55e6d1
+      streak >= 5 ? 0xffd76a : 0x55e6d1
     const panel = this.add
-      .rectangle(0, 0, 202, 46, 0x101821, 0.96)
+      .rectangle(0, 0, 202, 46, 0x24151c, 0.97)
       .setStrokeStyle(3, accentColor, 0.95)
     const copy = this.add
       .text(0, 0, `${streak}연속 베기!`, {
@@ -2521,7 +2793,7 @@ export class PrototypeScene extends Phaser.Scene {
         fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
         fontSize: '20px',
         fontStyle: 'bold',
-        stroke: '#101821',
+        stroke: '#24151c',
         strokeThickness: 3,
       })
       .setOrigin(0.5)
@@ -2579,7 +2851,7 @@ export class PrototypeScene extends Phaser.Scene {
   }
 
   private showChefReaction(
-    label: string,
+    _label: string,
     color: number,
     isMiss = false,
   ): void {
@@ -2587,20 +2859,6 @@ export class PrototypeScene extends Phaser.Scene {
       .circle(29, 49, 31, color, 0.12)
       .setStrokeStyle(5, color, 0.88)
       .setDepth(15)
-    const badge = this.add
-      .text(52, 137, label, {
-        color: '#fff8e7',
-        fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
-        fontSize: '17px',
-        fontStyle: 'bold',
-        backgroundColor: '#101821',
-        padding: { x: 11, y: 6 },
-        stroke: '#101821',
-        strokeThickness: 2,
-      })
-      .setOrigin(0, 0.5)
-      .setDepth(27)
-
     this.tweens.add({
       targets: ring,
       scale: 1.48,
@@ -2624,15 +2882,6 @@ export class PrototypeScene extends Phaser.Scene {
       })
     }
 
-    this.tweens.add({
-      targets: badge,
-      y: 124,
-      alpha: 0,
-      delay: this.reducedMotion ? 100 : 220,
-      duration: 230,
-      ease: 'Cubic.In',
-      onComplete: () => badge.destroy(),
-    })
   }
 
   private populateCaptureSlot(
@@ -2743,11 +2992,23 @@ export class PrototypeScene extends Phaser.Scene {
     this.children.remove(secondMaskGraphic)
     token.container.destroy()
 
-    this.drawCutFlash(entryPoint, exitPoint, profile)
+    this.drawCutFlash(
+      entryPoint,
+      exitPoint,
+      profile,
+      feedback.level === 'perfect',
+    )
     this.drawSliceParticles(midpoint, tangent, normal, profile)
+    const popupSide = token.container.x <= LOGICAL_WIDTH / 2 ? 1 : -1
+    const popupPoint = {
+      x:
+        token.container.x +
+        popupSide * (token.renderBounds.width / 2 + 64),
+      y: midpoint.y,
+    }
     this.showAccuracyPopup(
-      midpoint.x,
-      midpoint.y,
+      popupPoint.x,
+      popupPoint.y,
       roundedScore,
       feedback,
     )
@@ -2938,6 +3199,7 @@ export class PrototypeScene extends Phaser.Scene {
     lineStart: Point,
     lineEnd: Point,
     profile: Readonly<SliceImpactProfile>,
+    isPerfect: boolean,
   ): void {
     const deltaX = lineEnd.x - lineStart.x
     const deltaY = lineEnd.y - lineStart.y
@@ -2988,6 +3250,15 @@ export class PrototypeScene extends Phaser.Scene {
     )
     flash.fillStyle(0xffffff, 1)
     flash.fillCircle(midpoint.x, midpoint.y, 2.5)
+    if (isPerfect) {
+      flash.lineStyle(5, 0xffd76a, 0.92)
+      flash.strokeCircle(midpoint.x, midpoint.y, JUDGEMENT_RADIUS + 12)
+      flash.lineStyle(1.5, 0xfff8e7, 0.9)
+      flash.strokeCircle(midpoint.x, midpoint.y, JUDGEMENT_RADIUS + 20)
+      if (!this.reducedMotion) {
+        this.cameras.main.flash(72, 255, 226, 154, false)
+      }
+    }
 
     this.registerSliceFxObject()
     this.tweens.add({
@@ -3084,42 +3355,43 @@ export class PrototypeScene extends Phaser.Scene {
     score: number,
     feedback: Readonly<SliceFeedback>,
   ): void {
-    const popupStartY = Math.max(y - 26, ACCURACY_POPUP_MIN_Y)
+    const popupStartX = Phaser.Math.Clamp(x, 64, LOGICAL_WIDTH - 64)
+    const popupStartY = Phaser.Math.Clamp(y, ACCURACY_POPUP_MIN_Y, 650)
     const peakScale =
       feedback.level === 'perfect'
-        ? 1.2
+        ? 1.04
         : feedback.level === 'great'
-          ? 1.1
+          ? 1
           : feedback.level === 'good'
-            ? 1.04
-            : 0.98
+            ? 1
+            : 0.96
     const popup = this.add
       .text(
-        x,
+        popupStartX,
         popupStartY,
         feedback.label + '\n' + score.toFixed(1) + '%',
         {
           align: 'center',
           color: feedback.cssColor,
           fontFamily: 'Pretendard, Noto Sans KR, sans-serif',
-          fontSize: feedback.level === 'perfect' ? '32px' : '29px',
+          fontSize: feedback.level === 'perfect' ? '20px' : '18px',
           fontStyle: 'bold',
-          lineSpacing: 1,
-          backgroundColor: '#101821',
-          padding: { x: 12, y: 7 },
-          stroke: '#101821',
-          strokeThickness: 4,
+          lineSpacing: 0,
+          backgroundColor: '#24151c',
+          padding: { x: 8, y: 4 },
+          stroke: '#24151c',
+          strokeThickness: 3,
         },
       )
       .setOrigin(0.5)
       .setDepth(25)
-      .setScale(0.55)
+      .setScale(0.7)
       .setAlpha(0)
       .setAngle(feedback.level === 'perfect' ? -3 : 2)
 
     this.tweens.add({
       targets: popup,
-      y: popupStartY - 8,
+      y: popupStartY - 5,
       scale: peakScale,
       alpha: 1,
       duration: 90,
@@ -3127,7 +3399,7 @@ export class PrototypeScene extends Phaser.Scene {
       onComplete: () => {
         this.tweens.add({
           targets: popup,
-          y: popupStartY - 42,
+          y: popupStartY - 28,
           scale: peakScale * 0.96,
           alpha: 0,
           delay: 40,
@@ -3216,6 +3488,7 @@ export class PrototypeScene extends Phaser.Scene {
 
     this.sensoryFeedback.stopNarration()
     this.sensoryFeedback.stopMusic()
+    this.stopArenaVisualEffects()
     this.hideNarrationCaption()
     this.narrationAudioStarted = false
     this.tutorialComplete = true
@@ -3322,6 +3595,7 @@ export class PrototypeScene extends Phaser.Scene {
   private showResults(): void {
     this.sensoryFeedback.stopNarration()
     this.sensoryFeedback.stopMusic()
+    this.stopArenaVisualEffects()
     this.hideNarrationCaption()
     this.narrationAudioStarted = false
     this.isFinished = true
@@ -3580,7 +3854,7 @@ export class PrototypeScene extends Phaser.Scene {
         scaleX: resultChefScaleX,
         scaleY: resultChefScaleY,
         duration: 320,
-        ease: 'Back.Out',
+        ease: 'Cubic.Out',
       })
       this.tweens.add({
         targets: scoreCopy,
@@ -3624,38 +3898,36 @@ export class PrototypeScene extends Phaser.Scene {
       return
     }
 
-    const first = recentPath[0]!
-    this.trail.lineStyle(
-      this.reducedMotion ? 9 : 13,
-      0x55e6d1,
-      this.reducedMotion ? 0.12 : 0.2,
-    )
-    this.trail.beginPath()
-    this.trail.moveTo(first.x, first.y)
-    for (let index = 1; index < recentPath.length; index += 1) {
-      const point = recentPath[index]!
-      this.trail.lineTo(point.x, point.y)
-    }
-    this.trail.strokePath()
-
     for (let index = 1; index < recentPath.length; index += 1) {
       const previous = recentPath[index - 1]!
       const point = recentPath[index]!
       const recency = index / (recentPath.length - 1)
+      const taper = 1 - recency
       const sampleDistance = Phaser.Math.Distance.BetweenPoints(
         previous,
         point,
       )
       const speedFactor = Phaser.Math.Clamp(sampleDistance / 24, 0, 1)
-      const width =
-        1.5 +
-        recency * (this.reducedMotion ? 2 : 2.8) +
-        speedFactor * (this.reducedMotion ? 0.6 : 1.2)
+      const glowWidth =
+        3.8 + taper * (this.reducedMotion ? 4.4 : 6.2) + speedFactor * 0.8
+      const coreWidth =
+        1.2 + taper * (this.reducedMotion ? 2 : 3.2) + speedFactor * 0.6
 
       this.trail.lineStyle(
-        width,
+        glowWidth,
+        0x55e6d1,
+        (this.reducedMotion ? 0.1 : 0.16) + taper * 0.1,
+      )
+      this.trail.lineBetween(
+        previous.x,
+        previous.y,
+        point.x,
+        point.y,
+      )
+      this.trail.lineStyle(
+        coreWidth,
         0xfff8e7,
-        0.55 + recency * 0.4,
+        0.6 + taper * 0.34,
       )
       this.trail.lineBetween(
         previous.x,
@@ -3670,7 +3942,7 @@ export class PrototypeScene extends Phaser.Scene {
     this.trail.fillCircle(
       finalPoint.x,
       finalPoint.y,
-      this.reducedMotion ? 3 : 4.5,
+      this.reducedMotion ? 1.5 : 2,
     )
   }
 

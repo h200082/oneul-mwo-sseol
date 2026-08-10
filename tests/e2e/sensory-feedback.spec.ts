@@ -440,18 +440,32 @@ test('음식이 생성되면 MP3가 없어도 고양이 말풍선은 즉시 표�
   })
 
   const requestCount = state.sensoryFeedback.narrationRequestCount
-  await pressCanvasControl(page, 269, 44, async () => Promise.resolve())
+  await pressCanvasControl(page, 317, 44, async () => Promise.resolve())
   await expect
-    .poll(async () => (await readGameDebug(page)).narration.requestedEnabled)
+    .poll(async () => (await readSensoryDebug(page)).soundEnabled)
     .toBe(false)
   const muted = await readGameDebug(page)
+  expect(muted.narration).toMatchObject({
+    requestedEnabled: false,
+    effectiveEnabled: false,
+    audioStarted: false,
+  })
   expect(muted.narration.captionVisible).toBe(true)
   expect(muted.sensoryFeedback.narrationRequestCount).toBe(requestCount)
 
-  await pressCanvasControl(page, 269, 44, async () => Promise.resolve())
+  await pressCanvasControl(page, 317, 44, async () => Promise.resolve())
   await expect
-    .poll(async () => (await readGameDebug(page)).narration.effectiveEnabled)
-    .toBe(true)
+    .poll(async () => ({
+      soundEnabled: (await readSensoryDebug(page)).soundEnabled,
+      narration: (await readGameDebug(page)).narration,
+    }))
+    .toMatchObject({
+      soundEnabled: true,
+      narration: {
+        requestedEnabled: true,
+        effectiveEnabled: true,
+      },
+    })
   expect((await readGameDebug(page)).sensoryFeedback.narrationRequestCount).toBe(
     requestCount,
   )
@@ -461,7 +475,7 @@ test('음식이 생성되면 MP3가 없어도 고양이 말풍선은 즉시 표�
     .toBe(false)
   expect((await readGameDebug(page)).activeToken?.menuId).toBe(token.menuId)
 })
-test('효과음과 진동 설정을 따로 끄고 새로고침 후에도 유지한다', async ({
+test('음향과 진동 설정을 따로 끄고 새로고침 후에도 유지한다', async ({
   page,
 }) => {
   await installSensoryProbe(page)
@@ -471,7 +485,7 @@ test('효과음과 진동 설정을 따로 끄고 새로고침 후에도 유지�
   const sound = page.getByTestId('sound-toggle')
   const haptics = page.getByTestId('haptics-toggle')
   await expect(sound).toHaveAttribute('aria-pressed', 'true')
-  await expect(sound).toHaveAccessibleName('효과음 끄기')
+  await expect(sound).toHaveAccessibleName('음향 끄기')
   await expect(haptics).toBeEnabled()
   await expect(haptics).toHaveAttribute('aria-pressed', 'true')
 
@@ -538,6 +552,11 @@ test('게임 HUD 토글은 제스처를 소비하고 홈과 설정을 공유해 
   await expect
     .poll(async () => (await readSensoryDebug(page)).soundEnabled)
     .toBe(false)
+  expect((await readGameDebug(page)).narration).toMatchObject({
+    requestedEnabled: false,
+    effectiveEnabled: false,
+    audioStarted: false,
+  })
 
   await pressCanvasControl(page, 365, 44, async () => {
     expect((await readGameDebug(page)).inputMode).toBe('idle')
