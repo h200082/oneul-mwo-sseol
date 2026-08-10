@@ -49,11 +49,11 @@ service cloud.firestore {
           'createdAt',
           'updatedAt'
         ])
-        && data.schemaVersion in [1, 2]
+        && data.schemaVersion in [1, 2, 3]
         && data.code == code
         && validCode(code)
         && data.mealTime in ['lunch', 'dinner']
-        && data.status in ['waiting', 'started']
+        && data.status in ['waiting', 'preparing', 'started']
         && data.hostPlayerId is string
         && data.memberIds is list
         && data.players is map
@@ -67,6 +67,11 @@ service cloud.firestore {
         && data.updatedAt is timestamp
         && (
           (data.status == 'waiting' && data.start == null)
+          || (
+            data.status == 'preparing'
+            && data.schemaVersion == 3
+            && data.start is map
+          )
           || (data.status == 'started' && data.start is map)
         );
     }
@@ -83,6 +88,10 @@ service cloud.firestore {
         || (
           oldData.schemaVersion == 1
           && newData.schemaVersion == 2
+        )
+        || (
+          oldData.schemaVersion in [1, 2]
+          && newData.schemaVersion == 3
         );
     }
 
@@ -244,24 +253,80 @@ service cloud.firestore {
         );
     }
 
-    function isHostStart() {
+    function validV3StartBase(start, memberIds) {
+      return start is map
+        && start.keys().hasAll([
+          'startId',
+          'deckSeed',
+          'contentVersion',
+          'startAt',
+          'resultDeadlineAt',
+          'rosterIds',
+          'readyPlayerIds'
+        ])
+        && start.keys().hasOnly([
+          'startId',
+          'deckSeed',
+          'contentVersion',
+          'startAt',
+          'resultDeadlineAt',
+          'rosterIds',
+          'readyPlayerIds'
+        ])
+        && start.startId is string
+        && start.startId.size() >= 1
+        && start.startId.size() <= 128
+        && start.startId.matches('.*\\S.*')
+        && start.deckSeed is string
+        && start.deckSeed.size() >= 1
+        && start.deckSeed.size() <= 128
+        && start.deckSeed.matches('.*\\S.*')
+        && start.contentVersion is string
+        && start.contentVersion.size() >= 1
+        && start.contentVersion.size() <= 64
+        && start.contentVersion.matches('.*\\S.*')
+        && start.rosterIds == memberIds
+        && start.readyPlayerIds is list
+        && start.readyPlayerIds.toSet().size()
+          == start.readyPlayerIds.size()
+        && start.readyPlayerIds.toSet()
+          .difference(memberIds.toSet()).size() == 0;
+    }
+
+    function validPreparingStart(start, memberIds) {
+      return validV3StartBase(start, memberIds)
+        && start.startAt == null
+        && start.resultDeadlineAt == null;
+    }
+
+    function validFinalizedV3Start(start, memberIds) {
+      return validV3StartBase(start, memberIds)
+        && start.readyPlayerIds.size() == memberIds.size()
+        && start.readyPlayerIds.toSet() == memberIds.toSet()
+        && start.startAt is timestamp
+        && start.startAt >= request.time
+        && start.startAt <= request.time + duration.value(10, 's')
+        && start.resultDeadlineAt is timestamp
+        && start.resultDeadlineAt
+          == start.startAt + duration.value(180, 's');
+    }
+
+    function isHostPrepare() {
       let oldData = resource.data;
       let newData = request.resource.data;
 
       return validSchemaTransition(oldData, newData)
         && oldData.status == 'waiting'
-        && newData.status == 'started'
+        && newData.status == 'preparing'
+        && newData.schemaVersion == 3
         && request.auth.uid == oldData.hostPlayerId
         && oldData.memberIds.size() >= 2
         && oldData.memberIds.size() <= 8
         && newData.memberIds == oldData.memberIds
         && newData.players == oldData.players
         && newData.hostPlayerId == oldData.hostPlayerId
-        && validStart(
-          newData.start,
-          oldData.memberIds,
-          newData.schemaVersion
-        )
+        && validPreparingStart(newData.start, oldData.memberIds)
+        && newData.start.readyPlayerIds == []
         && newData.updatedAt == request.time
         && onlyRoomFieldsChanged([
           'status',
@@ -269,6 +334,53 @@ service cloud.firestore {
           'updatedAt',
           'schemaVersion'
         ]);
+    }
+
+    function isSelfReady() {
+      let oldData = resource.data;
+      let newData = request.resource.data;
+      let uid = request.auth.uid;
+
+      return oldData.status == 'preparing'
+        && newData.status == 'preparing'
+        && oldData.schemaVersion == 3
+        && newData.schemaVersion == 3
+        && uid in oldData.memberIds
+        && !(uid in oldData.start.readyPlayerIds)
+        && newData.memberIds == oldData.memberIds
+        && newData.players == oldData.players
+        && newData.hostPlayerId == oldData.hostPlayerId
+        && validPreparingStart(newData.start, oldData.memberIds)
+        && newData.start.startId == oldData.start.startId
+        && newData.start.readyPlayerIds
+          == oldData.start.readyPlayerIds.concat([uid])
+        && newData.start.diff(oldData.start).affectedKeys()
+          .hasOnly(['readyPlayerIds'])
+        && newData.updatedAt == request.time
+        && onlyRoomFieldsChanged(['start', 'updatedAt']);
+    }
+
+    function isHostFinalize() {
+      let oldData = resource.data;
+      let newData = request.resource.data;
+
+      return oldData.status == 'preparing'
+        && newData.status == 'started'
+        && oldData.schemaVersion == 3
+        && newData.schemaVersion == 3
+        && request.auth.uid == oldData.hostPlayerId
+        && oldData.start.readyPlayerIds.size()
+          == oldData.memberIds.size()
+        && oldData.start.readyPlayerIds.toSet()
+          == oldData.memberIds.toSet()
+        && newData.memberIds == oldData.memberIds
+        && newData.players == oldData.players
+        && newData.hostPlayerId == oldData.hostPlayerId
+        && validFinalizedV3Start(newData.start, oldData.memberIds)
+        && newData.start.diff(oldData.start).affectedKeys()
+          .hasOnly(['startAt', 'resultDeadlineAt'])
+        && newData.updatedAt == request.time
+        && onlyRoomFieldsChanged(['status', 'start', 'updatedAt']);
     }
 
     function validCapturedMenuIds(ids) {
@@ -312,7 +424,7 @@ service cloud.firestore {
           && request.time <=
             room.start.startAt + duration.value(180, 's')
         ) || (
-          room.schemaVersion == 2
+          room.schemaVersion in [2, 3]
           && request.time <= room.start.resultDeadlineAt
         );
     }
@@ -323,7 +435,7 @@ service cloud.firestore {
           && request.time >=
             room.start.startAt + duration.value(185, 's')
         ) || (
-          room.schemaVersion == 2
+          room.schemaVersion in [2, 3]
           && request.time >=
             room.start.resultDeadlineAt + duration.value(5, 's')
         );
@@ -381,7 +493,9 @@ service cloud.firestore {
           isSelfJoin()
           || isSelfReconnect()
           || isSelfLeave()
-          || isHostStart()
+          || isHostPrepare()
+          || isSelfReady()
+          || isHostFinalize()
         );
       allow delete: if signedIn()
         && resource.data.status == 'waiting'

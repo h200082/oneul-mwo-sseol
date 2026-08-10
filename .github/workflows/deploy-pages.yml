@@ -43,6 +43,20 @@ jobs:
       - name: Test Firestore rules
         run: npm run test:firebase-rules
 
+      - name: Validate production multiplayer config
+        env:
+          VITE_MULTIPLAYER_BACKEND: ${{ vars.VITE_MULTIPLAYER_BACKEND }}
+          VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
+        run: |
+          test "$VITE_MULTIPLAYER_BACKEND" = "firebase"
+          test -n "$VITE_FIREBASE_API_KEY"
+          test -n "$VITE_FIREBASE_AUTH_DOMAIN"
+          test -n "$VITE_FIREBASE_PROJECT_ID"
+          test -n "$VITE_FIREBASE_APP_ID"
+
       - name: Build
         run: npm run build
         env:

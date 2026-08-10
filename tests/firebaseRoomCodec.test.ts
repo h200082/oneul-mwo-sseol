@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  acknowledgeRoomReady,
   createRoom,
   joinRoom,
+  prepareRoomStart,
   startRoom,
 } from '../src/domain/room'
 import {
@@ -54,6 +56,60 @@ describe('Firebase room codec', () => {
     expect(restored.status).toBe('started')
     if (restored.status === 'started') {
       expect(restored.start.roster).toEqual(room.start.roster)
+    }
+  })
+
+  it('round-trips a preparing roster and its start-specific ready ids', () => {
+    const preparing = prepareRoomStart(createTwoPlayerRoom(), {
+      requesterPlayerId: 'host-uid',
+      startId: 'codec-round',
+      deckSeed: 'shared-seed',
+      contentVersion: 'menus-v1',
+    })
+    const hostReady = acknowledgeRoomReady(preparing, {
+      playerId: 'host-uid',
+      startId: 'codec-round',
+    })
+    const stored = encodeFirestoreRoom(hostReady)
+
+    expect(stored).toMatchObject({
+      schemaVersion: 3,
+      status: 'preparing',
+      start: {
+        startId: 'codec-round',
+        startAt: null,
+        resultDeadlineAt: null,
+        readyPlayerIds: ['host-uid'],
+      },
+    })
+    expect(decodeFirestoreRoom(stored, hostReady.code)).toEqual(hostReady)
+  })
+
+  it('rejects duplicate, outsider, and mismatched ready ids', () => {
+    const preparing = prepareRoomStart(createTwoPlayerRoom(), {
+      requesterPlayerId: 'host-uid',
+      startId: 'codec-round',
+      deckSeed: 'shared-seed',
+      contentVersion: 'menus-v1',
+    })
+    const stored = encodeFirestoreRoom(preparing)
+
+    for (const readyPlayerIds of [
+      ['host-uid', 'host-uid'],
+      ['outsider-uid'],
+    ]) {
+      expect(() =>
+        decodeFirestoreRoom(
+          {
+            ...stored,
+            start: {
+              ...stored.start,
+              readyPlayerIds,
+            },
+          },
+          stored.code,
+        ),
+      ).toThrow(/ready handshake/)
     }
   })
 

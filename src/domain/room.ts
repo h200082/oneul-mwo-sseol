@@ -13,7 +13,7 @@ export const ROOM_CODE_ALPHABET =
   "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 
 export type MealTime = "lunch" | "dinner";
-export type RoomStatus = "waiting" | "started";
+export type RoomStatus = "waiting" | "preparing" | "started";
 export type RoomPlayerRole = "host" | "member";
 export type RoomRandomSource = () => number;
 export type RoomDeckSeed = number | string;
@@ -27,8 +27,12 @@ export type RoomDomainErrorCode =
   | "PLAYER_NOT_FOUND"
   | "ROOM_FULL"
   | "ROOM_ALREADY_STARTED"
+  | "READY_HANDSHAKE_REQUIRED"
   | "HOST_ONLY"
   | "NOT_ENOUGH_PLAYERS"
+  | "INVALID_START_ID"
+  | "START_ID_MISMATCH"
+  | "NOT_ALL_PLAYERS_READY"
   | "INVALID_DECK_SEED"
   | "INVALID_CONTENT_VERSION"
   | "INVALID_START_AT";
@@ -67,24 +71,28 @@ export interface WaitingRoom extends RoomBase {
   readonly start: null;
 }
 
-export interface RoomStartSnapshot {
+export interface RoomPreparationSnapshot {
+  readonly startId: string;
   /**
    * All clients use this one seed to reproduce the same menu deck.
    */
   readonly deckSeed: RoomDeckSeed;
   readonly contentVersion: string;
   /**
-   * Shared Unix timestamp in milliseconds.
-   */
-  readonly startAt: number;
-  /**
-   * Shared cutoff after which missing submissions become DNF results.
-   */
-  readonly resultDeadlineAt: number;
-  /**
    * Immutable roster in the exact order used by the game and result screen.
    */
   readonly roster: readonly RoomPlayer[];
+  readonly readyPlayerIds: readonly string[];
+}
+
+export interface PreparingRoom extends RoomBase {
+  readonly status: "preparing";
+  readonly start: Readonly<RoomPreparationSnapshot>;
+}
+
+export interface RoomStartSnapshot extends RoomPreparationSnapshot {
+  readonly startAt: number;
+  readonly resultDeadlineAt: number;
 }
 
 export interface StartedRoom extends RoomBase {
@@ -92,7 +100,7 @@ export interface StartedRoom extends RoomBase {
   readonly start: Readonly<RoomStartSnapshot>;
 }
 
-export type Room = WaitingRoom | StartedRoom;
+export type Room = WaitingRoom | PreparingRoom | StartedRoom;
 
 export interface CreateRoomOptions extends RoomPlayerInput {
   readonly mealTime: MealTime;
@@ -103,6 +111,25 @@ export interface StartRoomOptions {
   readonly requesterPlayerId: string;
   readonly deckSeed: RoomDeckSeed;
   readonly contentVersion: string;
+  readonly startAt: number;
+  readonly startId?: string;
+}
+
+export interface PrepareRoomStartOptions {
+  readonly requesterPlayerId: string;
+  readonly startId: string;
+  readonly deckSeed: RoomDeckSeed;
+  readonly contentVersion: string;
+}
+
+export interface AcknowledgeRoomReadyOptions {
+  readonly playerId: string;
+  readonly startId: string;
+}
+
+export interface FinalizeRoomStartOptions {
+  readonly requesterPlayerId: string;
+  readonly startId: string;
   readonly startAt: number;
 }
 
@@ -205,7 +232,7 @@ export function joinRoom(
   room: Room,
   input: RoomPlayerInput,
 ): WaitingRoom {
-  if (room.status === "started") {
+  if (room.status !== "waiting") {
     throw roomError(
       "ROOM_ALREADY_STARTED",
       `Room "${room.code}" has already started.`,
@@ -269,7 +296,7 @@ export function leaveRoom(
   room: Room,
   playerId: string,
 ): WaitingRoom | null {
-  if (room.status === "started") {
+  if (room.status !== "waiting") {
     throw roomError(
       "ROOM_ALREADY_STARTED",
       `Room "${room.code}" has already started.`,
@@ -342,7 +369,7 @@ export function startRoom(
   room: Room,
   options: StartRoomOptions,
 ): StartedRoom {
-  if (room.status === "started") {
+  if (room.status !== "waiting") {
     throw roomError(
       "ROOM_ALREADY_STARTED",
       `Room "${room.code}" has already started.`,
@@ -379,12 +406,17 @@ export function startRoom(
     );
   }
   const roster = freezePlayers(room.players);
+  const startId = normalizeStartId(options.startId ?? "legacy-start");
   const start = Object.freeze({
+    startId,
     deckSeed,
     contentVersion,
     startAt,
     resultDeadlineAt,
     roster,
+    readyPlayerIds: freezePlayerIds(
+      roster.map((player) => player.playerId),
+    ),
   });
 
   return Object.freeze({
@@ -392,6 +424,200 @@ export function startRoom(
     status: "started",
     players: roster,
     start,
+  });
+}
+
+/**
+ * Locks the current roster and creates an idempotent preparation attempt.
+ */
+export function prepareRoomStart(
+  room: Room,
+  options: PrepareRoomStartOptions,
+): PreparingRoom {
+  const requesterPlayerId = normalizePlayerId(
+    options.requesterPlayerId,
+  );
+  const startId = normalizeStartId(options.startId);
+  const deckSeed = normalizeDeckSeed(options.deckSeed);
+  const contentVersion = normalizeContentVersion(
+    options.contentVersion,
+  );
+
+  if (requesterPlayerId !== room.hostPlayerId) {
+    throw roomError(
+      "HOST_ONLY",
+      "Only the room host may prepare the game.",
+    );
+  }
+
+  if (room.status === "preparing") {
+    if (
+      room.start.startId === startId &&
+      room.start.deckSeed === deckSeed &&
+      room.start.contentVersion === contentVersion
+    ) {
+      return room;
+    }
+    throw roomError(
+      "START_ID_MISMATCH",
+      "The room is already preparing a different start attempt.",
+    );
+  }
+
+  if (room.status === "started") {
+    throw roomError(
+      "ROOM_ALREADY_STARTED",
+      "The room has already started.",
+    );
+  }
+
+  if (room.players.length < MIN_ROOM_PLAYERS) {
+    throw roomError(
+      "NOT_ENOUGH_PLAYERS",
+      "At least two players are required to start.",
+    );
+  }
+
+  const roster = freezePlayers(room.players);
+  return Object.freeze({
+    ...room,
+    status: "preparing",
+    players: roster,
+    start: Object.freeze({
+      startId,
+      deckSeed,
+      contentVersion,
+      roster,
+      readyPlayerIds: freezePlayerIds([]),
+    }),
+  });
+}
+
+/**
+ * Acknowledges readiness for one locked-roster player. Duplicate
+ * acknowledgements are idempotent and stale start identities are rejected.
+ */
+export function acknowledgeRoomReady(
+  room: Room,
+  options: AcknowledgeRoomReadyOptions,
+): PreparingRoom | StartedRoom {
+  if (room.status === "waiting") {
+    throw roomError(
+      "READY_HANDSHAKE_REQUIRED",
+      "The host must prepare a start attempt before players can be ready.",
+    );
+  }
+
+  const playerId = normalizePlayerId(options.playerId);
+  const startId = normalizeStartId(options.startId);
+  if (room.start.startId !== startId) {
+    throw roomError(
+      "START_ID_MISMATCH",
+      "This readiness acknowledgement belongs to a stale start attempt.",
+    );
+  }
+  if (
+    !room.start.roster.some(
+      (player) => player.playerId === playerId,
+    )
+  ) {
+    throw roomError(
+      "PLAYER_NOT_FOUND",
+      "The player is not in the locked roster.",
+    );
+  }
+  if (room.start.readyPlayerIds.includes(playerId)) {
+    return room;
+  }
+  if (room.status === "started") {
+    throw roomError(
+      "ROOM_ALREADY_STARTED",
+      "A finalized start cannot accept a new readiness acknowledgement.",
+    );
+  }
+
+  const readyPlayerIds = freezePlayerIds(
+    [...room.start.readyPlayerIds, playerId],
+  );
+  return Object.freeze({
+    ...room,
+    start: Object.freeze({
+      ...room.start,
+      readyPlayerIds,
+    }),
+  });
+}
+
+/**
+ * Finalizes the shared clock only after every locked-roster player is ready.
+ */
+export function finalizeRoomStart(
+  room: Room,
+  options: FinalizeRoomStartOptions,
+): StartedRoom {
+  if (room.status === "waiting") {
+    throw roomError(
+      "READY_HANDSHAKE_REQUIRED",
+      "The host must prepare a start attempt before finalizing it.",
+    );
+  }
+
+  const requesterPlayerId = normalizePlayerId(
+    options.requesterPlayerId,
+  );
+  const startId = normalizeStartId(options.startId);
+  const startAt = validateStartAt(options.startAt);
+  if (requesterPlayerId !== room.hostPlayerId) {
+    throw roomError(
+      "HOST_ONLY",
+      "Only the room host may finalize the game start.",
+    );
+  }
+  if (room.start.startId !== startId) {
+    throw roomError(
+      "START_ID_MISMATCH",
+      "This finalization belongs to a stale start attempt.",
+    );
+  }
+  if (room.status === "started") {
+    if (room.start.startAt === startAt) {
+      return room;
+    }
+    throw roomError(
+      "ROOM_ALREADY_STARTED",
+      "The room already has a different finalized start time.",
+    );
+  }
+
+  if (
+    room.start.readyPlayerIds.length !== room.start.roster.length ||
+    room.start.roster.some(
+      (player) =>
+        !room.start.readyPlayerIds.includes(player.playerId),
+    )
+  ) {
+    throw roomError(
+      "NOT_ALL_PLAYERS_READY",
+      "Every locked-roster player must be ready before start time is finalized.",
+    );
+  }
+
+  const resultDeadlineAt = startAt + ROOM_RESULT_WINDOW_MS;
+  if (!Number.isSafeInteger(resultDeadlineAt)) {
+    throw roomError(
+      "INVALID_START_AT",
+      "The derived result deadline must be a safe integer timestamp.",
+    );
+  }
+
+  return Object.freeze({
+    ...room,
+    status: "started",
+    start: Object.freeze({
+      ...room.start,
+      startAt,
+      resultDeadlineAt,
+    }),
   });
 }
 
@@ -483,6 +709,24 @@ function validateStartAt(startAt: number): number {
   return startAt;
 }
 
+function normalizeStartId(startId: string): string {
+  if (typeof startId !== "string") {
+    throw roomError(
+      "INVALID_START_ID",
+      "A start identity must be a string.",
+    );
+  }
+
+  const normalized = startId.normalize("NFKC").trim();
+  if (normalized.length === 0 || normalized.length > 128) {
+    throw roomError(
+      "INVALID_START_ID",
+      "A start identity must contain between 1 and 128 characters.",
+    );
+  }
+  return normalized;
+}
+
 function freezePlayer(player: RoomPlayer): RoomPlayer {
   return Object.freeze({ ...player });
 }
@@ -491,6 +735,12 @@ function freezePlayers(
   players: readonly RoomPlayer[],
 ): readonly RoomPlayer[] {
   return Object.freeze(players.map((player) => freezePlayer(player)));
+}
+
+function freezePlayerIds(
+  playerIds: readonly string[],
+): readonly string[] {
+  return Object.freeze([...playerIds]);
 }
 
 function roomError(

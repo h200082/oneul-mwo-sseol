@@ -3,11 +3,17 @@ import {
   ROOM_CODE_LENGTH,
   ROOM_RESULT_SYNC_GRACE_MS,
   ROOM_RESULT_WINDOW_MS,
+  acknowledgeRoomReady as acknowledgeDomainRoomReady,
   createRoom as createDomainRoom,
+  finalizeRoomStart as finalizeDomainRoomStart,
   joinRoom as joinDomainRoom,
   leaveRoom as leaveDomainRoom,
-  startRoom as startDomainRoom,
+  prepareRoomStart as prepareDomainRoomStart,
+  type AcknowledgeRoomReadyOptions,
   type CreateRoomOptions,
+  type FinalizeRoomStartOptions,
+  type PrepareRoomStartOptions,
+  type PreparingRoom,
   type Room,
   type RoomPlayer,
   type RoomRandomSource,
@@ -218,7 +224,63 @@ export class LocalRoomGateway implements RoomGateway {
     options: StartRoomOptions,
   ): Promise<StartedRoom> {
     const room = this.requireRoom(roomCode)
-    const updated = startDomainRoom(room, options)
+    if (room.status === 'waiting') {
+      throw new Error(
+        'Ready handshake required before finalizing room start.',
+      )
+    }
+    if (
+      room.start.deckSeed !== options.deckSeed ||
+      room.start.contentVersion !== options.contentVersion
+    ) {
+      throw new Error(
+        'Legacy start retry does not match the prepared start.',
+      )
+    }
+    const updated = finalizeDomainRoomStart(room, {
+      requesterPlayerId: options.requesterPlayerId,
+      startId: room.start.startId,
+      startAt: options.startAt,
+    })
+    this.writeRoom(updated)
+    this.announce(updated)
+    return updated
+  }
+
+  async prepareStart(
+    roomCode: string,
+    options: PrepareRoomStartOptions,
+  ): Promise<PreparingRoom> {
+    const updated = prepareDomainRoomStart(
+      this.requireRoom(roomCode),
+      options,
+    )
+    this.writeRoom(updated)
+    this.announce(updated)
+    return updated
+  }
+
+  async acknowledgeReady(
+    roomCode: string,
+    options: AcknowledgeRoomReadyOptions,
+  ): Promise<PreparingRoom | StartedRoom> {
+    const updated = acknowledgeDomainRoomReady(
+      this.requireRoom(roomCode),
+      options,
+    )
+    this.writeRoom(updated)
+    this.announce(updated)
+    return updated
+  }
+
+  async finalizeStart(
+    roomCode: string,
+    options: FinalizeRoomStartOptions,
+  ): Promise<StartedRoom> {
+    const updated = finalizeDomainRoomStart(
+      this.requireRoom(roomCode),
+      options,
+    )
     this.writeRoom(updated)
     this.announce(updated)
     return updated
@@ -763,7 +825,7 @@ export class BrowserRoomNotificationChannel
 interface StoredRoomShape {
   readonly code: string
   readonly mealTime: 'lunch' | 'dinner'
-  readonly status: 'waiting' | 'started'
+  readonly status: 'waiting' | 'preparing' | 'started'
   readonly hostPlayerId: string
   readonly players: readonly StoredPlayerShape[]
   readonly start: unknown
@@ -815,10 +877,33 @@ function deserializeRoom(raw: string, expectedCode: string): Room {
   const start = readStoredStart(stored.start)
   validateStoredStartRoster(start.roster, room.players)
 
-  const startedRoom = startDomainRoom(room, {
+  let prepared: PreparingRoom | StartedRoom = prepareDomainRoomStart(room, {
     requesterPlayerId: stored.hostPlayerId,
+    startId: start.startId,
     deckSeed: start.deckSeed,
     contentVersion: start.contentVersion,
+  })
+  for (const playerId of start.readyPlayerIds) {
+    prepared = acknowledgeDomainRoomReady(prepared, {
+      playerId,
+      startId: start.startId,
+    })
+  }
+
+  if (stored.status === 'preparing') {
+    if (start.startAt !== null || start.resultDeadlineAt !== null) {
+      throw new Error(
+        'A preparing stored room cannot contain finalized timestamps.',
+      )
+    }
+    return prepared
+  }
+  if (start.startAt === null || start.resultDeadlineAt === null) {
+    throw new Error('A started stored room requires finalized timestamps.')
+  }
+  const startedRoom = finalizeDomainRoomStart(prepared, {
+    requesterPlayerId: stored.hostPlayerId,
+    startId: start.startId,
     startAt: start.startAt,
   })
   if (startedRoom.start.resultDeadlineAt !== start.resultDeadlineAt) {
@@ -844,7 +929,9 @@ function readStoredRoom(value: unknown): StoredRoomShape {
   if (
     typeof code !== 'string' ||
     (mealTime !== 'lunch' && mealTime !== 'dinner') ||
-    (status !== 'waiting' && status !== 'started') ||
+    (status !== 'waiting' &&
+      status !== 'preparing' &&
+      status !== 'started') ||
     typeof hostPlayerId !== 'string' ||
     !Array.isArray(players)
   ) {
@@ -902,11 +989,13 @@ function validateStoredRoster(room: StoredRoomShape): void {
 }
 
 interface StoredStartShape {
+  readonly startId: string
   readonly deckSeed: string | number
   readonly contentVersion: string
-  readonly startAt: number
-  readonly resultDeadlineAt: number
+  readonly startAt: number | null
+  readonly resultDeadlineAt: number | null
   readonly roster: readonly StoredPlayerShape[]
+  readonly readyPlayerIds: readonly string[]
 }
 
 function readStoredStart(value: unknown): StoredStartShape {
@@ -915,31 +1004,64 @@ function readStoredStart(value: unknown): StoredStartShape {
   }
 
   const {
+    startId,
     deckSeed,
     contentVersion,
     startAt,
     resultDeadlineAt,
     roster,
+    readyPlayerIds,
   } = value
   if (
     (typeof deckSeed !== 'string' &&
       typeof deckSeed !== 'number') ||
     typeof contentVersion !== 'string' ||
-    typeof startAt !== 'number' ||
+    (startAt !== undefined &&
+      startAt !== null &&
+      typeof startAt !== 'number') ||
     (resultDeadlineAt !== undefined &&
+      resultDeadlineAt !== null &&
       typeof resultDeadlineAt !== 'number') ||
-    !Array.isArray(roster)
+    !Array.isArray(roster) ||
+    (readyPlayerIds !== undefined &&
+      (!Array.isArray(readyPlayerIds) ||
+        readyPlayerIds.some(
+          (playerId) => typeof playerId !== 'string',
+        )))
   ) {
     throw new Error('Stored room start data has an invalid shape.')
   }
 
+  const storedRoster = roster.map(readStoredPlayer)
+  const rosterIds = storedRoster.map((player) => player.playerId)
+  const normalizedReadyIds =
+    readyPlayerIds === undefined
+      ? rosterIds
+      : (readyPlayerIds as string[])
+  const normalizedStartAt =
+    typeof startAt === 'number' ? startAt : null
+  if (
+    new Set(normalizedReadyIds).size !== normalizedReadyIds.length ||
+    normalizedReadyIds.some((playerId) => !rosterIds.includes(playerId))
+  ) {
+    throw new Error('Stored room ready ids are inconsistent.')
+  }
+
   return {
+    startId:
+      typeof startId === 'string' && startId.trim().length > 0
+        ? startId
+        : 'legacy-start',
     deckSeed,
     contentVersion,
-    startAt,
+    startAt: normalizedStartAt,
     resultDeadlineAt:
-      resultDeadlineAt ?? startAt + ROOM_RESULT_WINDOW_MS,
-    roster: roster.map(readStoredPlayer),
+      resultDeadlineAt ??
+      (normalizedStartAt === null
+        ? null
+        : normalizedStartAt + ROOM_RESULT_WINDOW_MS),
+    roster: storedRoster,
+    readyPlayerIds: normalizedReadyIds,
   }
 }
 

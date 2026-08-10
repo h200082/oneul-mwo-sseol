@@ -5,13 +5,49 @@ import type {
 import type { PlayerScoreSummary } from '../domain/gameRules'
 import type { RoomGameProgressIdentity } from './gameProgress'
 
+export const TUTORIAL_COMPLETE_EVENT = 'tutorial-complete' as const
+
 export interface GameLaunchOptions {
   readonly mode: 'solo' | 'room'
+  /** Omitted for a normal scoring game. Tutorial runs only two practice foods. */
+  readonly launchMode?: 'game' | 'tutorial'
   readonly mealTime: MealTime
   readonly deckSeed: RoomDeckSeed
+  /** Best score stored on this device before this solo run starts. */
+  readonly previousPersonalBestScore?: number
   readonly roomCode?: string
   /** Present only for a resumable multiplayer run. */
   readonly progressIdentity?: Readonly<RoomGameProgressIdentity>
+}
+
+export interface PersonalBestPresentation {
+  readonly bestScore: number
+  readonly status: 'first' | 'new' | 'existing'
+}
+
+export function resolvePersonalBestPresentation(
+  currentScore: number,
+  previousPersonalBestScore?: number,
+): Readonly<PersonalBestPresentation> {
+  const hasPreviousPersonalBest =
+    previousPersonalBestScore !== undefined &&
+    Number.isFinite(previousPersonalBestScore) &&
+    previousPersonalBestScore >= 0 &&
+    previousPersonalBestScore <= 100
+
+  if (!hasPreviousPersonalBest) {
+    return Object.freeze({
+      bestScore: currentScore,
+      status: 'first' as const,
+    })
+  }
+
+  const previousScore = previousPersonalBestScore
+  const isNewPersonalBest = currentScore > previousScore
+  return Object.freeze({
+    bestScore: isNewPersonalBest ? currentScore : previousScore,
+    status: isNewPersonalBest ? ('new' as const) : ('existing' as const),
+  })
 }
 
 /**
@@ -76,7 +112,11 @@ export function createPlayerGameResultReporter(
   let hasReported = false
 
   return (summary) => {
-    if (hasReported || !handler) {
+    if (
+      options.launchMode === 'tutorial' ||
+      hasReported ||
+      !handler
+    ) {
       return
     }
 

@@ -19,6 +19,7 @@ Desktop.ini
 *.tmp
 *.temp
 .cache/
+tmp/
 
 # Dependencies and generated output
 node_modules/
@@ -26,3 +27,10 @@ dist/
 coverage/
 playwright-report/
 test-results/
+__pycache__/
+*.pyc
+
+# Codex-local image review and generated staging files
+.codex/
+.codex-*
+art-review/

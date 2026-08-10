@@ -13,11 +13,17 @@ import {
 } from 'firebase/firestore'
 
 import {
+  acknowledgeRoomReady as acknowledgeDomainRoomReady,
   createRoom as createDomainRoom,
+  finalizeRoomStart as finalizeDomainRoomStart,
   joinRoom as joinDomainRoom,
   leaveRoom as leaveDomainRoom,
-  startRoom as startDomainRoom,
+  prepareRoomStart as prepareDomainRoomStart,
+  type AcknowledgeRoomReadyOptions,
   type CreateRoomOptions,
+  type FinalizeRoomStartOptions,
+  type PrepareRoomStartOptions,
+  type PreparingRoom,
   type Room,
   type RoomRandomSource,
   type StartedRoom,
@@ -33,6 +39,7 @@ import {
   type RoomGateway,
   type RoomErrorListener,
   type RoomListener,
+  type RoomMetadataListener,
   type RoomResultsErrorListener,
   type RoomResultsListener,
   type RoomUnsubscribe,
@@ -194,6 +201,7 @@ export class FirebaseRoomGateway implements RoomGateway {
     roomCode: string,
     listener: RoomListener,
     onError?: RoomErrorListener,
+    onMetadata?: RoomMetadataListener,
   ): Promise<RoomUnsubscribe> {
     const code = normalizeRoomCode(roomCode)
     return this.trackUnsubscriber(
@@ -201,19 +209,27 @@ export class FirebaseRoomGateway implements RoomGateway {
         this.roomRef(code),
         { includeMetadataChanges: true },
         (snapshot) => {
-          if (
-            snapshot.metadata.fromCache ||
-            snapshot.metadata.hasPendingWrites
-          ) {
+          const metadata = Object.freeze({
+            fromCache: snapshot.metadata.fromCache,
+            hasPendingWrites: snapshot.metadata.hasPendingWrites,
+          })
+          onMetadata?.(metadata)
+
+          if (metadata.hasPendingWrites) {
             return
           }
 
           try {
             if (!snapshot.exists()) {
-              listener(null)
+              if (!metadata.fromCache) {
+                listener(null)
+              }
               return
             }
-            listener(decodeRoomSnapshot(snapshot.data(), code))
+            const room = decodeRoomSnapshot(snapshot.data(), code)
+            if (!metadata.fromCache || room.status === 'started') {
+              listener(room)
+            }
           } catch (error) {
             onError?.(error)
           }
@@ -228,21 +244,56 @@ export class FirebaseRoomGateway implements RoomGateway {
     options: StartRoomOptions,
   ): Promise<StartedRoom> {
     this.assertPlayerIdentity(options.requesterPlayerId)
-    const code = normalizeRoomCode(roomCode)
-    const roomRef = this.roomRef(code)
-
-    return runTransaction(this.db, async (transaction) => {
-      const snapshot = await transaction.get(roomRef)
-      const room = requireRoomSnapshot(snapshot.data(), snapshot.exists(), code)
-      const updated = startDomainRoom(room, options)
-
-      transaction.set(roomRef, {
-        ...encodeRoomForFirestore(updated),
-        createdAt: readCreatedAt(snapshot.data()),
-        updatedAt: serverTimestamp(),
+    return this.updateRoom(roomCode, (room) => {
+      if (room.status === 'waiting') {
+        throw new Error(
+          'Ready handshake required before finalizing room start.',
+        )
+      }
+      if (
+        room.start.deckSeed !== options.deckSeed ||
+        room.start.contentVersion !== options.contentVersion
+      ) {
+        throw new Error(
+          'Legacy start retry does not match the prepared start.',
+        )
+      }
+      return finalizeDomainRoomStart(room, {
+        requesterPlayerId: options.requesterPlayerId,
+        startId: room.start.startId,
+        startAt: options.startAt,
       })
-      return updated
     })
+  }
+
+  async prepareStart(
+    roomCode: string,
+    options: PrepareRoomStartOptions,
+  ): Promise<PreparingRoom> {
+    this.assertPlayerIdentity(options.requesterPlayerId)
+    return this.updateRoom(roomCode, (room) =>
+      prepareDomainRoomStart(room, options),
+    )
+  }
+
+  async acknowledgeReady(
+    roomCode: string,
+    options: AcknowledgeRoomReadyOptions,
+  ): Promise<PreparingRoom | StartedRoom> {
+    this.assertPlayerIdentity(options.playerId)
+    return this.updateRoom(roomCode, (room) =>
+      acknowledgeDomainRoomReady(room, options),
+    )
+  }
+
+  async finalizeStart(
+    roomCode: string,
+    options: FinalizeRoomStartOptions,
+  ): Promise<StartedRoom> {
+    this.assertPlayerIdentity(options.requesterPlayerId)
+    return this.updateRoom(roomCode, (room) =>
+      finalizeDomainRoomStart(room, options),
+    )
   }
 
   async submitResult(
@@ -364,6 +415,13 @@ export class FirebaseRoomGateway implements RoomGateway {
     roomCode: string,
     update: (room: Room) => WaitingRoom,
   ): Promise<WaitingRoom> {
+    return this.updateRoom(roomCode, update)
+  }
+
+  private async updateRoom<T extends Room>(
+    roomCode: string,
+    update: (room: Room) => T,
+  ): Promise<T> {
     const code = normalizeRoomCode(roomCode)
     const roomRef = this.roomRef(code)
 
@@ -371,6 +429,9 @@ export class FirebaseRoomGateway implements RoomGateway {
       const snapshot = await transaction.get(roomRef)
       const room = requireRoomSnapshot(snapshot.data(), snapshot.exists(), code)
       const updated = update(room)
+      if (updated === room) {
+        return updated
+      }
 
       transaction.set(roomRef, {
         ...encodeRoomForFirestore(updated),
@@ -436,15 +497,18 @@ function encodeRoomForFirestore(room: Room): Record<string, unknown> {
         ? null
         : {
             ...encoded.start,
-            startAt: Timestamp.fromMillis(encoded.start.startAt),
-            ...(encoded.start.resultDeadlineAt === undefined
-              ? {}
-              : {
-                  resultDeadlineAt: Timestamp.fromMillis(
+            startAt:
+              encoded.start.startAt === null
+                ? null
+                : Timestamp.fromMillis(encoded.start.startAt),
+            resultDeadlineAt:
+              encoded.start.resultDeadlineAt === null
+                ? null
+                : Timestamp.fromMillis(
                     encoded.start.resultDeadlineAt,
                   ),
-                }),
             rosterIds: [...encoded.start.rosterIds],
+            readyPlayerIds: [...encoded.start.readyPlayerIds],
           },
   }
 }
@@ -456,16 +520,22 @@ function decodeRoomSnapshot(data: DocumentData, roomCode: string): Room {
         ...data,
         start:
           isRecord(data.start) &&
-          data.start.startAt instanceof Timestamp
+          (data.start.startAt instanceof Timestamp ||
+            data.start.startAt === null)
             ? {
                 ...data.start,
-                startAt: data.start.startAt.toMillis(),
+                startAt:
+                  data.start.startAt instanceof Timestamp
+                    ? data.start.startAt.toMillis()
+                    : null,
                 ...(data.start.resultDeadlineAt instanceof Timestamp
                   ? {
                       resultDeadlineAt:
                         data.start.resultDeadlineAt.toMillis(),
                     }
-                  : {}),
+                  : data.start.resultDeadlineAt === null
+                    ? { resultDeadlineAt: null }
+                    : {}),
               }
             : data.start,
       },

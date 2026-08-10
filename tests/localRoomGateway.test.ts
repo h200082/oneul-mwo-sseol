@@ -3,6 +3,7 @@ import { describe, expect, test, vi } from 'vitest'
 import {
   MAX_ROOM_PLAYERS,
   type Room,
+  type StartRoomOptions,
 } from '../src/domain/room'
 import {
   BrowserRoomNotificationChannel,
@@ -197,7 +198,7 @@ describe('LocalRoomGateway', () => {
     )
 
     unsubscribe()
-    await guestGateway.start(room.code, {
+    await startWithReadyHandshake(guestGateway, room.code, {
       requesterPlayerId: 'host',
       deckSeed: 'shared-seed',
       contentVersion: 'menus-v1',
@@ -237,7 +238,7 @@ describe('LocalRoomGateway', () => {
       code: 'ROOM_FULL',
     })
 
-    await gateway.start(room.code, {
+    await startWithReadyHandshake(gateway, room.code, {
       requesterPlayerId: 'player-0',
       deckSeed: 42,
       contentVersion: 'menus-v1',
@@ -274,7 +275,12 @@ describe('LocalRoomGateway', () => {
     } as const
 
     await expect(
-      gateway.start(room.code, startOptions),
+      gateway.prepareStart(room.code, {
+        requesterPlayerId: startOptions.requesterPlayerId,
+        startId: 'not-enough-round',
+        deckSeed: startOptions.deckSeed,
+        contentVersion: startOptions.contentVersion,
+      }),
     ).rejects.toMatchObject({
       code: 'NOT_ENOUGH_PLAYERS',
     })
@@ -285,17 +291,98 @@ describe('LocalRoomGateway', () => {
     })
 
     await expect(
-      gateway.start(room.code, {
-        ...startOptions,
+      gateway.prepareStart(room.code, {
         requesterPlayerId: 'guest',
+        startId: 'member-round',
+        deckSeed: startOptions.deckSeed,
+        contentVersion: startOptions.contentVersion,
       }),
     ).rejects.toMatchObject({
       code: 'HOST_ONLY',
     })
 
-    const started = await gateway.start(room.code, startOptions)
+    const started = await startWithReadyHandshake(
+      gateway,
+      room.code,
+      startOptions,
+    )
     expect(started.status).toBe('started')
     expect(started.start.roster).toEqual(started.players)
+  })
+
+  test('준비 상태를 저장하고 오래된 ack와 전원 준비 전 확정을 거부한다', async () => {
+    const storage = new MemoryStorage()
+    const hub = new MemoryNotificationHub()
+    const hostGateway = new LocalRoomGateway({
+      storage,
+      notifications: hub.createChannel(),
+      rng: constantRandom(0.61),
+    })
+    const memberGateway = new LocalRoomGateway({
+      storage,
+      notifications: hub.createChannel(),
+    })
+    const room = await hostGateway.create({
+      mealTime: 'lunch',
+      playerId: 'host',
+      nickname: 'Host',
+    })
+    await memberGateway.join(room.code, {
+      playerId: 'member',
+      nickname: 'Member',
+    })
+
+    const prepared = await hostGateway.prepareStart(room.code, {
+      requesterPlayerId: 'host',
+      startId: 'persisted-round',
+      deckSeed: 'ready-seed',
+      contentVersion: 'menus-v1',
+    })
+    expect(prepared.start.readyPlayerIds).toEqual([])
+    await expect(memberGateway.get(room.code)).resolves.toEqual(prepared)
+    await expect(
+      memberGateway.acknowledgeReady(room.code, {
+        playerId: 'member',
+        startId: 'stale-round',
+      }),
+    ).rejects.toMatchObject({ code: 'START_ID_MISMATCH' })
+
+    const hostReady = await hostGateway.acknowledgeReady(room.code, {
+      playerId: 'host',
+      startId: 'persisted-round',
+    })
+    await expect(
+      hostGateway.finalizeStart(room.code, {
+        requesterPlayerId: 'host',
+        startId: 'persisted-round',
+        startAt: 5_000,
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_ALL_PLAYERS_READY' })
+    await expect(
+      hostGateway.acknowledgeReady(room.code, {
+        playerId: 'host',
+        startId: 'persisted-round',
+      }),
+    ).resolves.toEqual(hostReady)
+
+    await memberGateway.acknowledgeReady(room.code, {
+      playerId: 'member',
+      startId: 'persisted-round',
+    })
+    const started = await hostGateway.finalizeStart(room.code, {
+      requesterPlayerId: 'host',
+      startId: 'persisted-round',
+      startAt: 5_000,
+    })
+    expect(started.start.readyPlayerIds).toEqual(['host', 'member'])
+    await expect(
+      hostGateway.start(room.code, {
+        requesterPlayerId: 'host',
+        deckSeed: started.start.deckSeed,
+        contentVersion: started.start.contentVersion,
+        startAt: started.start.startAt,
+      }),
+    ).resolves.toEqual(started)
   })
 
   test('없는 방과 손상된 저장 데이터는 구분해 보고한다', async () => {
@@ -427,7 +514,7 @@ describe('LocalRoomGateway leave', () => {
       playerId: 'guest',
       nickname: '참가자',
     })
-    const started = await gateway.start(room.code, {
+    const started = await startWithReadyHandshake(gateway, room.code, {
       requesterPlayerId: 'host',
       deckSeed: 'locked-seed',
       contentVersion: 'menus-v1',
@@ -470,7 +557,7 @@ describe('LocalRoomGateway results', () => {
       playerId: 'guest',
       nickname: '참가자',
     })
-    await gateway.start(room.code, {
+    await startWithReadyHandshake(gateway, room.code, {
       requesterPlayerId: 'host',
       deckSeed: 'seed',
       contentVersion: 'menus-v1',
@@ -802,10 +889,36 @@ async function createStartedRoom(gateway: LocalRoomGateway) {
     playerId: 'guest',
     nickname: '참가자',
   })
-  return gateway.start(room.code, {
+  return startWithReadyHandshake(gateway, room.code, {
     requesterPlayerId: 'host',
     deckSeed: 'shared-seed',
     contentVersion: 'menus-v1',
     startAt: Date.now(),
+  })
+}
+
+async function startWithReadyHandshake(
+  gateway: LocalRoomGateway,
+  roomCode: string,
+  options: StartRoomOptions,
+) {
+  const startId =
+    'test-' + roomCode + '-' + String(options.startAt)
+  const prepared = await gateway.prepareStart(roomCode, {
+    requesterPlayerId: options.requesterPlayerId,
+    startId,
+    deckSeed: options.deckSeed,
+    contentVersion: options.contentVersion,
+  })
+  for (const player of prepared.start.roster) {
+    await gateway.acknowledgeReady(roomCode, {
+      playerId: player.playerId,
+      startId,
+    })
+  }
+  return gateway.finalizeStart(roomCode, {
+    requesterPlayerId: options.requesterPlayerId,
+    startId,
+    startAt: options.startAt,
   })
 }

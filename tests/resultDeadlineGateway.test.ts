@@ -40,10 +40,22 @@ describe('LocalRoomGateway result deadline', () => {
       playerId: 'guest',
       nickname: '참가자',
     })
-    const started = await gateway.start(waiting.code, {
+    const startId = 'deadline-round'
+    const prepared = await gateway.prepareStart(waiting.code, {
       requesterPlayerId: 'host',
+      startId,
       deckSeed: 'deadline-seed',
       contentVersion: 'menus-v1',
+    })
+    for (const player of prepared.start.roster) {
+      await gateway.acknowledgeReady(waiting.code, {
+        playerId: player.playerId,
+        startId,
+      })
+    }
+    const started = await gateway.finalizeStart(waiting.code, {
+      requesterPlayerId: 'host',
+      startId,
       startAt: now,
     })
     const deadline = now + ROOM_RESULT_WINDOW_MS

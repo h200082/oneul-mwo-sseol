@@ -1,19 +1,29 @@
 import { expect, test, type Page } from '@playwright/test'
 
+import { enterMainMenu } from './appEntry'
+
 interface ControllerHarnessOptions {
   readonly failFirstQrRender?: boolean
+  readonly startWithOnePlayer?: boolean
+  readonly autoReadyGuest?: boolean
 }
 
 interface ControllerHarnessWindow extends Window {
   __APP_LOBBY_SYNC_TEST__?: {
     readonly emitStarted: () => void
     readonly emitWaiting: () => void
+    readonly emitCachedMetadata: () => void
+    readonly advanceServerToJoinedSilently: () => void
+    readonly advanceServerToWaitingSilently: () => void
+    readonly advanceServerToStartedSilently: () => void
+    readonly acknowledgeGuestAndEmit: () => void
+    readonly emitGuestOnlyReadySnapshot: () => void
     readonly applyWaitingSnapshot: () => boolean
     readonly emitSubscriptionError: () => void
     readonly holdNextGet: () => void
     readonly resolveHeldGet: () => void
     readonly triggerOnlineAndVisible: () => string
-    readonly getRoomStatus: () => 'waiting' | 'started' | null
+    readonly getRoomStatus: () => 'waiting' | 'preparing' | 'started' | null
     readonly getSubscribeCalls: () => number
     readonly getAuthoritativeGetCalls: () => number
     readonly getActiveSubscriptions: () => number
@@ -28,14 +38,27 @@ async function installControllerHarness(
   await page.goto('/')
   await page.evaluate(async (harnessOptions: ControllerHarnessOptions) => {
     type HarnessRoom = {
-      readonly status: 'waiting' | 'started'
+      readonly status: 'waiting' | 'preparing' | 'started'
     }
     type HarnessRoomListener = (room: HarnessRoom | null) => void
     type HarnessErrorListener = (error: unknown) => void
-    type HarnessStartOptions = {
+    type HarnessMetadataListener = (metadata: {
+      readonly fromCache: boolean
+      readonly hasPendingWrites: boolean
+    }) => void
+    type HarnessPrepareOptions = {
       readonly requesterPlayerId: string
+      readonly startId: string
       readonly deckSeed: string | number
       readonly contentVersion: string
+    }
+    type HarnessReadyOptions = {
+      readonly playerId: string
+      readonly startId: string
+    }
+    type HarnessFinalizeOptions = {
+      readonly requesterPlayerId: string
+      readonly startId: string
       readonly startAt: number
     }
 
@@ -73,14 +96,20 @@ async function installControllerHarness(
       nickname: '방장',
       rng: () => 0,
     })
-    const waitingRoom = roomDomain.joinRoom(hostRoom, {
+    const joinedRoom = roomDomain.joinRoom(hostRoom, {
       playerId: 'guest-player',
       nickname: '참가자',
     }) as HarnessRoom
+    const waitingRoom = (
+      harnessOptions.startWithOnePlayer ? hostRoom : joinedRoom
+    ) as HarnessRoom
+    let authoritativeRoom: HarnessRoom = waitingRoom
+    let preparingRoom: HarnessRoom | null = null
     let startedRoom: HarnessRoom | null = null
     let roomListener: HarnessRoomListener | null = null
     let lastRoomListener: HarnessRoomListener | null = null
     let roomErrorListener: HarnessErrorListener | null = null
+    let roomMetadataListener: HarnessMetadataListener | null = null
     let subscribeCalls = 0
     let authoritativeGetCalls = 0
     let activeSubscriptions = 0
@@ -95,11 +124,33 @@ async function installControllerHarness(
       }
     }
 
-    const createStartedRoom = (startAt = Date.now() + 30_000): HarnessRoom => {
-      startedRoom ??= roomDomain.startRoom(waitingRoom, {
+    const createPreparedRoom = (): HarnessRoom => {
+      preparingRoom ??= roomDomain.prepareRoomStart(joinedRoom, {
         requesterPlayerId: 'host-player',
+        startId: 'controller-sync-start',
         deckSeed: 'controller-sync-seed',
-        contentVersion: 'menus-v1',
+        contentVersion: 'menus-v2',
+      }) as HarnessRoom
+      return preparingRoom
+    }
+
+    const createStartedRoom = (startAt = Date.now() + 30_000): HarnessRoom => {
+      if (startedRoom) {
+        return startedRoom
+      }
+      let readyRoom = createPreparedRoom()
+      readyRoom = roomDomain.acknowledgeRoomReady(readyRoom, {
+        playerId: 'host-player',
+        startId: 'controller-sync-start',
+      }) as HarnessRoom
+      readyRoom = roomDomain.acknowledgeRoomReady(readyRoom, {
+        playerId: 'guest-player',
+        startId: 'controller-sync-start',
+      }) as HarnessRoom
+      preparingRoom = readyRoom
+      startedRoom = roomDomain.finalizeRoomStart(readyRoom, {
+        requesterPlayerId: 'host-player',
+        startId: 'controller-sync-start',
         startAt,
       }) as HarnessRoom
       return startedRoom
@@ -111,7 +162,7 @@ async function installControllerHarness(
       get: async (): Promise<HarnessRoom> => {
         authoritativeGetCalls += 1
         if (!holdNextGet) {
-          return waitingRoom
+          return authoritativeRoom
         }
         holdNextGet = false
         return new Promise<HarnessRoom>((resolve) => {
@@ -123,12 +174,14 @@ async function installControllerHarness(
         _roomCode: string,
         listener: HarnessRoomListener,
         onError?: HarnessErrorListener,
+        onMetadata?: HarnessMetadataListener,
       ) => {
         subscribeCalls += 1
         activeSubscriptions += 1
         roomListener = listener
         lastRoomListener = listener
         roomErrorListener = onError ?? null
+        roomMetadataListener = onMetadata ?? null
         let active = true
         return () => {
           if (!active) {
@@ -139,19 +192,55 @@ async function installControllerHarness(
           if (roomListener === listener) {
             roomListener = null
             roomErrorListener = null
+            roomMetadataListener = null
           }
         }
       },
-      start: async (
+      prepareStart: async (
         _roomCode: string,
-        startOptions: HarnessStartOptions,
+        startOptions: HarnessPrepareOptions,
       ) => {
-        // No listener echo: the controller must consume the transaction return.
-        startedRoom = roomDomain.startRoom(
-          waitingRoom,
+        preparingRoom = roomDomain.prepareRoomStart(
+          authoritativeRoom,
           startOptions,
         ) as HarnessRoom
+        authoritativeRoom = preparingRoom
+        return preparingRoom
+      },
+      acknowledgeReady: async (
+        _roomCode: string,
+        readyOptions: HarnessReadyOptions,
+      ) => {
+        let readyRoom = roomDomain.acknowledgeRoomReady(
+          authoritativeRoom,
+          readyOptions,
+        ) as HarnessRoom
+        if (
+          harnessOptions.autoReadyGuest !== false &&
+          readyRoom.status === 'preparing'
+        ) {
+          readyRoom = roomDomain.acknowledgeRoomReady(readyRoom, {
+            playerId: 'guest-player',
+            startId: readyOptions.startId,
+          }) as HarnessRoom
+        }
+        preparingRoom = readyRoom
+        authoritativeRoom = readyRoom
+        return readyRoom
+      },
+      finalizeStart: async (
+        _roomCode: string,
+        finalizeOptions: HarnessFinalizeOptions,
+      ) => {
+        startedRoom = roomDomain.finalizeRoomStart(
+          authoritativeRoom,
+          finalizeOptions,
+        ) as HarnessRoom
+        authoritativeRoom = startedRoom
         return startedRoom
+      },
+      start: async () => {
+        throw new Error('legacy direct start must not be used')
       },
       submitResult: async () => [],
       readAuthoritativeResultState: async () => ({
@@ -178,6 +267,64 @@ async function installControllerHarness(
       emitWaiting: () => {
         lastRoomListener?.(waitingRoom)
       },
+      emitCachedMetadata: () => {
+        roomMetadataListener?.({
+          fromCache: true,
+          hasPendingWrites: false,
+        })
+      },
+      advanceServerToJoinedSilently: () => {
+        authoritativeRoom = joinedRoom
+      },
+      advanceServerToWaitingSilently: () => {
+        authoritativeRoom = waitingRoom
+      },
+      advanceServerToStartedSilently: () => {
+        authoritativeRoom = createStartedRoom()
+      },
+      acknowledgeGuestAndEmit: () => {
+        if (authoritativeRoom.status !== 'preparing') {
+          throw new Error('room is not preparing')
+        }
+        const startId = (
+          authoritativeRoom as HarnessRoom & {
+            readonly start: { readonly startId: string }
+          }
+        ).start.startId
+        preparingRoom = roomDomain.acknowledgeRoomReady(authoritativeRoom, {
+          playerId: 'guest-player',
+          startId,
+        }) as HarnessRoom
+        authoritativeRoom = preparingRoom
+        emitRoom(preparingRoom)
+      },
+      emitGuestOnlyReadySnapshot: () => {
+        if (authoritativeRoom.status !== 'preparing') {
+          throw new Error('room is not preparing')
+        }
+        const currentStart = (
+          authoritativeRoom as HarnessRoom & {
+            readonly start: {
+              readonly startId: string
+              readonly deckSeed: string | number
+              readonly contentVersion: string
+            }
+          }
+        ).start
+        let regressedRoom = roomDomain.prepareRoomStart(joinedRoom, {
+          requesterPlayerId: 'host-player',
+          startId: currentStart.startId,
+          deckSeed: currentStart.deckSeed,
+          contentVersion: currentStart.contentVersion,
+        }) as HarnessRoom
+        regressedRoom = roomDomain.acknowledgeRoomReady(regressedRoom, {
+          playerId: 'guest-player',
+          startId: currentStart.startId,
+        }) as HarnessRoom
+        preparingRoom = regressedRoom
+        authoritativeRoom = regressedRoom
+        emitRoom(regressedRoom)
+      },
       applyWaitingSnapshot: () =>
         (
           app as unknown as {
@@ -197,7 +344,7 @@ async function installControllerHarness(
           throw new Error('no authoritative get is waiting')
         }
         heldGetResolver = null
-        resolve(waitingRoom)
+        resolve(authoritativeRoom)
       },
       triggerOnlineAndVisible: () => {
         try {
@@ -220,6 +367,7 @@ async function installControllerHarness(
     }
   }, options)
 
+  await enterMainMenu(page)
   await page.getByLabel('닉네임').fill('방장')
   await page.getByTestId('create-room').click()
 }
@@ -247,6 +395,12 @@ async function readHarnessValue<T>(
 type HarnessEvent =
   | 'emitStarted'
   | 'emitWaiting'
+  | 'emitCachedMetadata'
+  | 'advanceServerToJoinedSilently'
+  | 'advanceServerToWaitingSilently'
+  | 'advanceServerToStartedSilently'
+  | 'acknowledgeGuestAndEmit'
+  | 'emitGuestOnlyReadySnapshot'
   | 'emitSubscriptionError'
   | 'holdNextGet'
   | 'resolveHeldGet'
@@ -280,7 +434,7 @@ test.describe('AppController lobby synchronization', () => {
     await expect(page.getByTestId('countdown')).toBeVisible()
   })
 
-  test('start 반환 상태만으로 listener echo 없이 호스트를 시작한다', async ({
+  test('3단계 반환 상태만으로 listener echo 없이 호스트를 시작한다', async ({
     page,
   }) => {
     await installControllerHarness(page)
@@ -292,6 +446,165 @@ test.describe('AppController lobby synchronization', () => {
     await expect
       .poll(() => readHarnessValue<string | null>(page, 'getRoomStatus'))
       .toBe('started')
+  })
+
+  test('모든 기기가 준비되기 전에는 카운트다운을 시작하지 않는다', async ({
+    page,
+  }) => {
+    await installControllerHarness(page, { autoReadyGuest: false })
+    await page.getByTestId('start-room').click()
+
+    await expect
+      .poll(() => readHarnessValue<string | null>(page, 'getRoomStatus'), {
+        timeout: 7_000,
+      })
+      .toBe('preparing')
+    await expect(page.getByTestId('start-room')).toHaveText('준비 1/2', {
+      timeout: 7_000,
+    })
+    await expect(page.getByTestId('countdown')).toHaveCount(0)
+
+    await emitHarnessEvent(page, 'acknowledgeGuestAndEmit')
+
+    await expect(page.getByTestId('countdown')).toBeVisible({
+      timeout: 7_000,
+    })
+    await expect
+      .poll(() => readHarnessValue<string | null>(page, 'getRoomStatus'))
+      .toBe('started')
+  })
+
+  test('동시 ACK에서 내 준비 기록이 유실돼도 다시 ACK하고 시작한다', async ({
+    page,
+  }) => {
+    await installControllerHarness(page, { autoReadyGuest: false })
+    await page.getByTestId('start-room').click()
+
+    await expect(page.getByTestId('start-room')).toHaveText('준비 1/2', {
+      timeout: 7_000,
+    })
+    await emitHarnessEvent(page, 'emitGuestOnlyReadySnapshot')
+
+    await expect(page.getByTestId('countdown')).toBeVisible({
+      timeout: 7_000,
+    })
+    await expect
+      .poll(() => readHarnessValue<string | null>(page, 'getRoomStatus'))
+      .toBe('started')
+  })
+
+  test('stale authoritative 상태를 거절한 뒤에도 heartbeat를 계속한다', async ({
+    page,
+  }) => {
+    await installControllerHarness(page, { autoReadyGuest: false })
+    await page.getByTestId('start-room').click()
+    await expect(page.getByTestId('start-room')).toHaveText('준비 1/2', {
+      timeout: 7_000,
+    })
+
+    await emitHarnessEvent(page, 'advanceServerToWaitingSilently')
+    const getCallsBefore = await readHarnessValue<number>(
+      page,
+      'getAuthoritativeGetCalls',
+    )
+    await expect
+      .poll(
+        () => readHarnessValue<number>(page, 'getAuthoritativeGetCalls'),
+        { timeout: 7_000 },
+      )
+      .toBeGreaterThan(getCallsBefore + 1)
+
+    await expect
+      .poll(() => readHarnessValue<string | null>(page, 'getRoomStatus'))
+      .toBe('preparing')
+    await expect(page.getByTestId('countdown')).toHaveCount(0)
+  })
+
+  test('최초 waiting 뒤 listener가 조용히 멈춰도 heartbeat get으로 started를 복구한다', async ({
+    page,
+  }) => {
+    await installControllerHarness(page)
+    await expect(page.getByTestId('player-count')).toHaveText('2/8')
+    await expect
+      .poll(() => readHarnessValue<number>(page, 'getSubscribeCalls'))
+      .toBe(1)
+
+    // 최초 server waiting 이후에는 listener event와 error를 모두 생략한다.
+    await emitHarnessEvent(page, 'emitWaiting')
+    await expect
+      .poll(() => readHarnessValue<string | null>(page, 'getRoomStatus'))
+      .toBe('waiting')
+    const getCallsBefore = await readHarnessValue<number>(
+      page,
+      'getAuthoritativeGetCalls',
+    )
+
+    await emitHarnessEvent(page, 'advanceServerToStartedSilently')
+
+    await expect
+      .poll(
+        () => readHarnessValue<number>(page, 'getAuthoritativeGetCalls'),
+        { timeout: 7_000 },
+      )
+      .toBeGreaterThan(getCallsBefore)
+    await expect(page.getByTestId('countdown')).toBeVisible({
+      timeout: 7_000,
+    })
+    await expect(page.locator('.lobby-screen')).toHaveCount(0)
+    await expect
+      .poll(() => readHarnessValue<string | null>(page, 'getRoomStatus'))
+      .toBe('started')
+    await expect
+      .poll(() => readHarnessValue<number>(page, 'getActiveSubscriptions'))
+      .toBe(0)
+  })
+
+  test('1인 waiting 뒤 join event를 놓쳐도 저속 heartbeat로 2인 상태를 복구한다', async ({
+    page,
+  }) => {
+    await installControllerHarness(page, { startWithOnePlayer: true })
+    await expect(page.getByTestId('player-count')).toHaveText('1/8')
+    await emitHarnessEvent(page, 'emitWaiting')
+    const getCallsBefore = await readHarnessValue<number>(
+      page,
+      'getAuthoritativeGetCalls',
+    )
+
+    await emitHarnessEvent(page, 'advanceServerToJoinedSilently')
+
+    await expect
+      .poll(
+        () => readHarnessValue<number>(page, 'getAuthoritativeGetCalls'),
+        { timeout: 8_000 },
+      )
+      .toBeGreaterThan(getCallsBefore)
+    await expect(page.getByTestId('player-count')).toHaveText('2/8')
+    await expect(page.getByTestId('start-room')).toBeEnabled()
+  })
+
+  test('fromCache metadata를 받으면 heartbeat 전에 서버 상태를 재확인한다', async ({
+    page,
+  }) => {
+    await installControllerHarness(page)
+    await expect
+      .poll(() => readHarnessValue<number>(page, 'getSubscribeCalls'))
+      .toBe(1)
+    await emitHarnessEvent(page, 'emitWaiting')
+    await emitHarnessEvent(page, 'advanceServerToStartedSilently')
+    const getCallsBefore = await readHarnessValue<number>(
+      page,
+      'getAuthoritativeGetCalls',
+    )
+
+    await emitHarnessEvent(page, 'emitCachedMetadata')
+
+    await expect
+      .poll(
+        () => readHarnessValue<number>(page, 'getAuthoritativeGetCalls'),
+        { timeout: 1_000 },
+      )
+      .toBeGreaterThan(getCallsBefore)
+    await expect(page.getByTestId('countdown')).toBeVisible()
   })
 
   test('started를 본 뒤 도착한 stale waiting 상태로 역행하지 않는다', async ({
@@ -328,6 +641,11 @@ test.describe('AppController lobby synchronization', () => {
     await expect
       .poll(() => readHarnessValue<number>(page, 'getSubscribeCalls'))
       .toBe(1)
+    await emitHarnessEvent(page, 'emitWaiting')
+    const getCallsBefore = await readHarnessValue<number>(
+      page,
+      'getAuthoritativeGetCalls',
+    )
 
     await emitHarnessEvent(page, 'emitSubscriptionError')
 
@@ -337,7 +655,7 @@ test.describe('AppController lobby synchronization', () => {
       .toBe('recovering')
     await expect
       .poll(() => readHarnessValue<number>(page, 'getAuthoritativeGetCalls'))
-      .toBe(1)
+      .toBeGreaterThan(getCallsBefore)
     await expect
       .poll(() => readHarnessValue<number>(page, 'getSubscribeCalls'))
       .toBe(2)
@@ -354,6 +672,11 @@ test.describe('AppController lobby synchronization', () => {
     page,
   }) => {
     await installControllerHarness(page)
+    await emitHarnessEvent(page, 'emitWaiting')
+    const getCallsBefore = await readHarnessValue<number>(
+      page,
+      'getAuthoritativeGetCalls',
+    )
     await emitHarnessEvent(page, 'holdNextGet')
 
     const visibilityState = await page.evaluate(() => {
@@ -367,10 +690,10 @@ test.describe('AppController lobby synchronization', () => {
     expect(visibilityState).toBe('visible')
     await expect
       .poll(() => readHarnessValue<number>(page, 'getAuthoritativeGetCalls'))
-      .toBe(1)
+      .toBe(getCallsBefore + 1)
     await expect
       .poll(() => readHarnessValue<number>(page, 'getActiveSubscriptions'))
-      .toBe(0)
+      .toBe(1)
     expect(await readHarnessValue<number>(page, 'getSubscribeCalls')).toBe(1)
 
     await emitHarnessEvent(page, 'resolveHeldGet')
@@ -384,6 +707,46 @@ test.describe('AppController lobby synchronization', () => {
     await expect
       .poll(() => readHarnessValue<string>(page, 'getSyncPhase'))
       .toBe('live')
-    expect(await readHarnessValue<number>(page, 'getAuthoritativeGetCalls')).toBe(1)
+    expect(
+      await readHarnessValue<number>(page, 'getAuthoritativeGetCalls'),
+    ).toBe(getCallsBefore + 1)
+  })
+
+  test('authoritative get이 멈춰도 deadline 뒤 refresh lock을 풀고 복구한다', async ({
+    page,
+  }) => {
+    await installControllerHarness(page)
+    await emitHarnessEvent(page, 'emitWaiting')
+    const getCallsBefore = await readHarnessValue<number>(
+      page,
+      'getAuthoritativeGetCalls',
+    )
+    const subscribeCallsBefore = await readHarnessValue<number>(
+      page,
+      'getSubscribeCalls',
+    )
+    await emitHarnessEvent(page, 'holdNextGet')
+
+    await expect
+      .poll(
+        () => readHarnessValue<number>(page, 'getAuthoritativeGetCalls'),
+        { timeout: 5_000 },
+      )
+      .toBe(getCallsBefore + 1)
+    await expect
+      .poll(
+        () => readHarnessValue<number>(page, 'getAuthoritativeGetCalls'),
+        { timeout: 8_000 },
+      )
+      .toBeGreaterThan(getCallsBefore + 1)
+    await expect
+      .poll(() => readHarnessValue<string>(page, 'getSyncPhase'))
+      .toBe('live')
+    await expect
+      .poll(() => readHarnessValue<number>(page, 'getActiveSubscriptions'))
+      .toBe(1)
+    expect(
+      await readHarnessValue<number>(page, 'getSubscribeCalls'),
+    ).toBe(subscribeCallsBefore)
   })
 })

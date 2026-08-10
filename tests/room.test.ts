@@ -6,12 +6,15 @@ import {
   ROOM_CODE_ALPHABET,
   ROOM_CODE_LENGTH,
   RoomDomainError,
+  acknowledgeRoomReady,
   canStartRoom,
   createRoom,
+  finalizeRoomStart,
   generateRoomCode,
   joinRoom,
   leaveRoom,
   normalizeNickname,
+  prepareRoomStart,
   startRoom,
   type MealTime,
   type Room,
@@ -156,6 +159,137 @@ describe("room identity and creation", () => {
       () => generateRoomCode(() => Number.NaN),
       "INVALID_RANDOM_VALUE",
     );
+  });
+});
+
+describe("ready start handshake", () => {
+  it("locks the roster and keeps an identical prepare retry idempotent", () => {
+    const waiting = makeTwoPlayerRoom();
+    const options = {
+      requesterPlayerId: "host-id",
+      startId: "round-1",
+      deckSeed: "shared-seed",
+      contentVersion: "menus-v1",
+    } as const;
+
+    const preparing = prepareRoomStart(waiting, options);
+
+    expect(preparing).toMatchObject({
+      status: "preparing",
+      start: {
+        startId: "round-1",
+        readyPlayerIds: [],
+      },
+    });
+    expect(prepareRoomStart(preparing, options)).toBe(preparing);
+    expectRoomError(
+      () =>
+        joinRoom(preparing, {
+          playerId: "late-player",
+          nickname: "Late",
+        }),
+      "ROOM_ALREADY_STARTED",
+    );
+    expectRoomError(
+      () => leaveRoom(preparing, "member-id"),
+      "ROOM_ALREADY_STARTED",
+    );
+  });
+
+  it("rejects stale and non-roster acknowledgements", () => {
+    const preparing = prepareRoomStart(makeTwoPlayerRoom(), {
+      requesterPlayerId: "host-id",
+      startId: "round-current",
+      deckSeed: 42,
+      contentVersion: "menus-v1",
+    });
+
+    expectRoomError(
+      () =>
+        acknowledgeRoomReady(preparing, {
+          playerId: "member-id",
+          startId: "round-old",
+        }),
+      "START_ID_MISMATCH",
+    );
+    expectRoomError(
+      () =>
+        acknowledgeRoomReady(preparing, {
+          playerId: "outsider",
+          startId: "round-current",
+        }),
+      "PLAYER_NOT_FOUND",
+    );
+  });
+
+  it("finalizes only after every locked player is ready", () => {
+    const preparing = prepareRoomStart(makeTwoPlayerRoom(), {
+      requesterPlayerId: "host-id",
+      startId: "round-ready",
+      deckSeed: 42,
+      contentVersion: "menus-v1",
+    });
+    const hostReady = acknowledgeRoomReady(preparing, {
+      playerId: "host-id",
+      startId: "round-ready",
+    });
+
+    expectRoomError(
+      () =>
+        finalizeRoomStart(hostReady, {
+          requesterPlayerId: "host-id",
+          startId: "round-ready",
+          startAt: 10_000,
+        }),
+      "NOT_ALL_PLAYERS_READY",
+    );
+
+    const allReady = acknowledgeRoomReady(hostReady, {
+      playerId: "member-id",
+      startId: "round-ready",
+    });
+    expect(
+      acknowledgeRoomReady(allReady, {
+        playerId: "member-id",
+        startId: "round-ready",
+      }),
+    ).toBe(allReady);
+    expectRoomError(
+      () =>
+        finalizeRoomStart(allReady, {
+          requesterPlayerId: "member-id",
+          startId: "round-ready",
+          startAt: 10_000,
+        }),
+      "HOST_ONLY",
+    );
+
+    const started = finalizeRoomStart(allReady, {
+      requesterPlayerId: "host-id",
+      startId: "round-ready",
+      startAt: 10_000,
+    });
+    expect(started).toMatchObject({
+      status: "started",
+      start: {
+        startId: "round-ready",
+        readyPlayerIds: ["host-id", "member-id"],
+        startAt: 10_000,
+      },
+    });
+    expect(
+      finalizeRoomStart(started, {
+        requesterPlayerId: "host-id",
+        startId: "round-ready",
+        startAt: 10_000,
+      }),
+    ).toBe(started);
+    expect(
+      acknowledgeRoomReady(started, {
+        playerId: "host-id",
+        startId: "round-ready",
+      }),
+    ).toBe(started);
   });
 });
 
