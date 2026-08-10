@@ -6,10 +6,21 @@ const LOGICAL_WIDTH = 390
 const LOGICAL_HEIGHT = 844
 
 interface DebugScene {
+  add: {
+    text: (
+      x: number,
+      y: number,
+      text: string,
+    ) => {
+      destroy: () => void
+      style: { resolution: number }
+    }
+  }
   children: {
     list: Array<{
       name?: string
       text?: string
+      style?: { resolution: number }
     }>
   }
   cameras: {
@@ -23,6 +34,17 @@ interface DebugScene {
         height: number
       }
     }
+  }
+  input: {
+    once: (
+      event: 'pointerdown',
+      listener: (pointer: {
+        positionToCamera: (camera: DebugScene['cameras']['main']) => {
+          x: number
+          y: number
+        }
+      }) => void,
+    ) => void
   }
   getDebugState: () => {
     introVisible: boolean
@@ -46,6 +68,7 @@ interface DebugGame {
 
 interface DebugWindow extends Window {
   __NHN_GAME__?: DebugGame
+  __NHN_POINTER_WORLD__?: { x: number; y: number }
 }
 
 test('320×568 compact 게임은 전체 폭과 높이를 쓰면서 논리 화면을 자르지 않는다', async ({
@@ -67,16 +90,34 @@ test('320×568 compact 게임은 전체 폭과 높이를 쓰면서 논리 화면
   expect(bounds.height).toBeCloseTo(568, 0)
 
   const metrics = await readGameLayout(page)
-  expect(metrics.backingWidth).toBe(320)
-  expect(metrics.backingHeight).toBe(568)
-  expect(metrics.scaleWidth).toBe(320)
-  expect(metrics.scaleHeight).toBe(568)
-  expect(metrics.zoomX).toBeCloseTo(320 / LOGICAL_WIDTH, 4)
-  expect(metrics.zoomY).toBeCloseTo(568 / LOGICAL_HEIGHT, 4)
-  expect(metrics.worldX).toBeCloseTo(0, 3)
-  expect(metrics.worldY).toBeCloseTo(0, 3)
-  expect(metrics.worldWidth).toBeCloseTo(LOGICAL_WIDTH, 3)
-  expect(metrics.worldHeight).toBeCloseTo(LOGICAL_HEIGHT, 3)
+  const expectedRenderScale = Math.min(metrics.devicePixelRatio, 2)
+  const expectedZoom = Math.min(
+    metrics.backingWidth / LOGICAL_WIDTH,
+    metrics.backingHeight / LOGICAL_HEIGHT,
+  )
+  expect(metrics.backingWidth / bounds.width).toBeCloseTo(
+    expectedRenderScale,
+    2,
+  )
+  expect(metrics.backingHeight / bounds.height).toBeCloseTo(
+    expectedRenderScale,
+    2,
+  )
+  expect(metrics.scaleWidth).toBe(metrics.backingWidth)
+  expect(metrics.scaleHeight).toBe(metrics.backingHeight)
+  expect(metrics.zoomX).toBeCloseTo(expectedZoom, 4)
+  expect(metrics.zoomY).toBeCloseTo(metrics.zoomX, 6)
+  expect(metrics.worldX).toBeLessThanOrEqual(0)
+  expect(metrics.worldY).toBeLessThanOrEqual(0)
+  expect(metrics.worldX + metrics.worldWidth).toBeGreaterThanOrEqual(
+    LOGICAL_WIDTH,
+  )
+  expect(metrics.worldY + metrics.worldHeight).toBeGreaterThanOrEqual(
+    LOGICAL_HEIGHT,
+  )
+  expect(await readDynamicTextResolution(page)).toBe(expectedRenderScale)
+
+  await expectLogicalPointer(page, 48, 420, true)
 
   await page.screenshot({
     path: 'tmp/compact-gameplay-320x568.png',
@@ -137,10 +178,25 @@ test('320×568 별도 튜토리얼은 전체 폭 진입 버튼과 완료 화면�
   expect(canvasBounds.height).toBeCloseTo(568, 0)
 
   const metrics = await readGameLayout(page)
-  expect(metrics.backingWidth).toBe(320)
-  expect(metrics.backingHeight).toBe(568)
-  expect(metrics.worldWidth).toBeCloseTo(LOGICAL_WIDTH, 3)
-  expect(metrics.worldHeight).toBeCloseTo(LOGICAL_HEIGHT, 3)
+  const expectedRenderScale = Math.min(metrics.devicePixelRatio, 2)
+  expect(metrics.backingWidth / canvasBounds.width).toBeCloseTo(
+    expectedRenderScale,
+    2,
+  )
+  expect(metrics.backingHeight / canvasBounds.height).toBeCloseTo(
+    expectedRenderScale,
+    2,
+  )
+  expect(metrics.zoomX).toBeCloseTo(metrics.zoomY, 6)
+  expect(metrics.worldX).toBeLessThanOrEqual(0)
+  expect(metrics.worldY).toBeLessThanOrEqual(0)
+  expect(metrics.worldX + metrics.worldWidth).toBeGreaterThanOrEqual(
+    LOGICAL_WIDTH,
+  )
+  expect(metrics.worldY + metrics.worldHeight).toBeGreaterThanOrEqual(
+    LOGICAL_HEIGHT,
+  )
+  expect(await readDynamicTextResolution(page)).toBe(expectedRenderScale)
 
   await page.evaluate(() => {
     const scene = (window as DebugWindow).__NHN_GAME__?.scene.getScene(
@@ -219,6 +275,46 @@ test('390×844 이상 화면은 기존 FIT 비율과 결과 버튼 입력을 유
   await expect(canvas).toHaveCount(0)
 })
 
+test('Pixel 7 uses capped high-DPI backing with aligned world input', async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== 'mobile-chromium',
+    'The Pixel 7 DPR contract is verified in mobile Chromium.',
+  )
+
+  await startSoloGameplay(page)
+
+  const canvas = page.locator('#game-root canvas')
+  const bounds = await requiredBox(canvas)
+  const metrics = await readGameLayout(page)
+  const expectedRenderScale = Math.min(metrics.devicePixelRatio, 2)
+
+  expect(metrics.backingWidth).toBe(
+    Math.round(LOGICAL_WIDTH * expectedRenderScale),
+  )
+  expect(metrics.backingHeight).toBe(
+    Math.round(LOGICAL_HEIGHT * expectedRenderScale),
+  )
+  expect(metrics.backingWidth / bounds.width).toBeCloseTo(
+    expectedRenderScale,
+    1,
+  )
+  expect(metrics.backingHeight / bounds.height).toBeCloseTo(
+    expectedRenderScale,
+    1,
+  )
+  expect(metrics.zoomX).toBeCloseTo(expectedRenderScale, 4)
+  expect(metrics.zoomY).toBeCloseTo(metrics.zoomX, 6)
+  expect(metrics.worldX).toBeCloseTo(0, 3)
+  expect(metrics.worldY).toBeCloseTo(0, 3)
+  expect(metrics.worldWidth).toBeCloseTo(LOGICAL_WIDTH, 3)
+  expect(metrics.worldHeight).toBeCloseTo(LOGICAL_HEIGHT, 3)
+  expect(await readDynamicTextResolution(page)).toBe(expectedRenderScale)
+
+  await expectLogicalPointer(page, 342, 420, true)
+})
+
 async function startSoloGameplay(page: Page): Promise<void> {
   await page.goto('/')
   await enterMainMenu(page)
@@ -260,6 +356,7 @@ async function startSoloGameplay(page: Page): Promise<void> {
 }
 
 async function readGameLayout(page: Page): Promise<{
+  devicePixelRatio: number
   backingWidth: number
   backingHeight: number
   scaleWidth: number
@@ -278,6 +375,7 @@ async function readGameLayout(page: Page): Promise<{
     }
     const camera = game.scene.getScene('prototype').cameras.main
     return {
+      devicePixelRatio: window.devicePixelRatio,
       backingWidth: game.canvas.width,
       backingHeight: game.canvas.height,
       scaleWidth: game.scale.width,
@@ -332,13 +430,84 @@ async function clickLogicalPoint(
   logicalX: number,
   logicalY: number,
 ): Promise<void> {
+  await activateLogicalPoint(page, logicalX, logicalY, false)
+}
+
+async function expectLogicalPointer(
+  page: Page,
+  logicalX: number,
+  logicalY: number,
+  useTap: boolean,
+): Promise<void> {
+  await page.evaluate(() => {
+    const debugWindow = window as DebugWindow
+    const scene = debugWindow.__NHN_GAME__?.scene.getScene('prototype')
+    if (!scene) {
+      throw new Error('Prototype scene is unavailable.')
+    }
+    delete debugWindow.__NHN_POINTER_WORLD__
+    scene.input.once('pointerdown', (pointer) => {
+      const worldPoint = pointer.positionToCamera(scene.cameras.main)
+      debugWindow.__NHN_POINTER_WORLD__ = {
+        x: worldPoint.x,
+        y: worldPoint.y,
+      }
+    })
+  })
+
+  await activateLogicalPoint(page, logicalX, logicalY, useTap)
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as DebugWindow).__NHN_POINTER_WORLD__ ?? null,
+      ),
+    )
+    .not.toBeNull()
+
+  const worldPoint = await page.evaluate(
+    () => (window as DebugWindow).__NHN_POINTER_WORLD__,
+  )
+  expect(worldPoint).toBeDefined()
+  expect(Math.abs(worldPoint!.x - logicalX)).toBeLessThan(2)
+  expect(Math.abs(worldPoint!.y - logicalY)).toBeLessThan(2)
+}
+
+async function activateLogicalPoint(
+  page: Page,
+  logicalX: number,
+  logicalY: number,
+  useTap: boolean,
+): Promise<void> {
   const canvas = page.locator('#game-root canvas')
   const bounds = await requiredBox(canvas)
-  await canvas.click({
-    position: {
-      x: (logicalX / LOGICAL_WIDTH) * bounds.width,
-      y: (logicalY / LOGICAL_HEIGHT) * bounds.height,
-    },
+  const metrics = await readGameLayout(page)
+  const position = {
+    x: ((logicalX - metrics.worldX) / metrics.worldWidth) * bounds.width,
+    y: ((logicalY - metrics.worldY) / metrics.worldHeight) * bounds.height,
+  }
+
+  if (useTap) {
+    await canvas.tap({ position })
+  } else {
+    await canvas.click({ position })
+  }
+}
+
+async function readDynamicTextResolution(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const scene = (window as DebugWindow).__NHN_GAME__?.scene.getScene(
+      'prototype',
+    )
+    if (!scene) {
+      throw new Error('Prototype scene is unavailable.')
+    }
+
+    const probe = scene.add.text(-1_000, -1_000, 'DPR probe')
+    try {
+      return probe.style.resolution
+    } finally {
+      probe.destroy()
+    }
   })
 }
 

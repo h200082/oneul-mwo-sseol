@@ -75,7 +75,8 @@ const CAPTURE_DRAG_THRESHOLD = 14
 const TOKEN_VISUAL_MAX_WIDTH = 128
 const TOKEN_VISUAL_MAX_HEIGHT = 112
 const CAPTURE_EFFECT_DURATION_MS = 480
-const SLICE_ROUND_TRANSITION_MS = 500
+const NORMAL_ROUND_TRANSITION_MS = 1_500
+const TUTORIAL_SLICE_ROUND_TRANSITION_MS = 500
 const INTRO_AUTO_DISMISS_MS = 2_300
 const PRACTICE_FALL_DURATION_MS = 7_000
 const SLICE_STREAK_MILESTONES = [3, 5, 8] as const
@@ -2321,13 +2322,7 @@ export class PrototypeScene extends Phaser.Scene {
       })
     }
 
-    const nextRoundDelay =
-      action.type === 'capture'
-        ? CAPTURE_EFFECT_DURATION_MS + 60
-        : action.type === 'slice'
-          ? SLICE_ROUND_TRANSITION_MS
-          : 260
-    this.time.delayedCall(nextRoundDelay, () => this.spawnRound())
+    this.time.delayedCall(NORMAL_ROUND_TRANSITION_MS, () => this.spawnRound())
   }
 
   private resolvePracticeRound(
@@ -2392,7 +2387,9 @@ export class PrototypeScene extends Phaser.Scene {
         sliceProfile,
       )
       this.updateHud()
-      this.time.delayedCall(SLICE_ROUND_TRANSITION_MS, () => this.spawnRound())
+      this.time.delayedCall(TUTORIAL_SLICE_ROUND_TRANSITION_MS, () =>
+        this.spawnRound(),
+      )
       return
     }
 

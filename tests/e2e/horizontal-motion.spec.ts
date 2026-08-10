@@ -63,6 +63,7 @@ test.beforeEach(async ({ page }) => {
 test('moves only the final two foods and carries upright label and artwork together', async ({
   page,
 }) => {
+  test.setTimeout(90_000)
   const deckSeed = 'horizontal-e2e-seed-v1'
   await startSeededGame(page, deckSeed)
   await advanceToRound(page, 17)

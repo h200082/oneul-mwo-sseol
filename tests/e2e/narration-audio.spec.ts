@@ -18,6 +18,8 @@ interface SensoryDebugState {
 
 interface GameDebugState {
   readonly activeToken: { readonly menuId: string } | null
+  readonly completedRounds: number
+  readonly lastAction: 'slice' | 'capture' | 'miss' | null
   readonly introVisible: boolean
   readonly narration: {
     readonly menuId: string | null
@@ -72,6 +74,11 @@ interface NarrationRequestAudit {
 const AUDIO_FIRST_CASE = findSeedCase(
   'narration-audio-first',
   (deck) => APPROVED_AUDIO_IDS.has(deck[0] ?? ''),
+)
+const TRANSITION_AUDIO_CASE = findSeedCase(
+  'narration-transition-audio',
+  (deck) =>
+    deck.slice(0, 4).every((menuId) => APPROVED_AUDIO_IDS.has(menuId)),
 )
 const CAPTION_ONLY_FIRST_CASE = findOptionalSeedCase(
   'narration-caption-only-first',
@@ -144,6 +151,194 @@ test('현재 덱의 정적 오디오만 준비하고 첫 음식 음성 재생과
     .poll(async () => (await readSensoryDebug(page)).musicDucked)
     .toBe(false)
   expect((await readSensoryDebug(page)).musicPlaying).toBe(true)
+})
+
+test('일반 베기·포획·놓침은 음성을 유지한 채 정확히 1.5초 뒤 다음 음식 또는 결과로 전환한다', async ({
+  page,
+}) => {
+  await installNarrationAudioProbe(page)
+  await startSoloGameWithSeed(
+    page,
+    TRANSITION_AUDIO_CASE.seed,
+    TRANSITION_AUDIO_CASE.mealTime,
+  )
+
+  const checkpoints = await page.evaluate(() => {
+    type TestAction = 'slice' | 'capture' | 'miss'
+    type TestToken = {
+      readonly menu: { readonly id: string }
+      readonly container: {
+        readonly x: number
+        readonly y: number
+        destroy(): void
+      }
+      readonly tween: { pause(): void; stop(): void }
+      readonly rotationTween: {
+        pause(): void
+        stop(): void
+      } | null
+    }
+    type TestScene = {
+      time: {
+        paused: boolean
+        now: number
+        preUpdate(): void
+        update(time: number, delta: number): void
+      }
+      activeToken: TestToken | null
+      deck: Array<{ readonly id: string }>
+      rounds: Array<{
+        readonly roundIndex: number
+        readonly menuId: string
+        readonly action: { readonly type: 'slice'; readonly accuracy: number }
+      }>
+      isFinished: boolean
+      getDebugState(): GameDebugState
+      resolveRound(
+        action:
+          | { readonly type: 'slice'; readonly accuracy: number }
+          | { readonly type: 'capture' }
+          | { readonly type: 'miss' },
+        decision?: unknown,
+      ): void
+      spawnRound(): void
+    }
+
+    const scene = (
+      window as NarrationDebugWindow
+    ).__NHN_GAME__?.scene.getScene('prototype') as unknown as
+      | TestScene
+      | undefined
+    const probe = (window as NarrationDebugWindow).__NARRATION_AUDIO_PROBE__
+    if (!scene || !probe) {
+      throw new Error('전환 테스트를 위한 게임 장면 또는 음성 프로브가 없습니다.')
+    }
+
+    const advanceResolvedRound = (action: TestAction) => {
+      const token = scene.activeToken
+      if (!token) {
+        throw new Error(action + ' 전환을 확정할 활성 음식이 없습니다.')
+      }
+
+      scene.time.paused = true
+      token.tween.pause()
+      token.rotationTween?.pause()
+      const menuId = token.menu.id
+      const startsBefore = probe.bufferStarts
+      const stopsBefore = probe.bufferStops
+
+      if (action === 'slice') {
+        scene.resolveRound(
+          { type: 'slice', accuracy: 90 },
+          {
+            kind: 'slice',
+            chord: {
+              entryPoint: {
+                x: token.container.x - 64,
+                y: token.container.y,
+              },
+              exitPoint: {
+                x: token.container.x + 64,
+                y: token.container.y,
+              },
+            },
+          },
+        )
+      } else {
+        scene.resolveRound({ type: action })
+      }
+
+      scene.time.preUpdate()
+      scene.time.paused = false
+      scene.time.update(scene.time.now + 1_499, 1_499)
+      scene.time.paused = true
+      const at1499 = {
+        activeMenuId: scene.activeToken?.menu.id ?? null,
+        narrationPlaying:
+          scene.getDebugState().sensoryFeedback.narrationPlaying,
+        bufferStarts: probe.bufferStarts,
+        bufferStops: probe.bufferStops,
+        finished: scene.isFinished,
+      }
+
+      scene.time.paused = false
+      scene.time.update(scene.time.now + 1, 1)
+      scene.time.paused = true
+      const at1500 = {
+        activeMenuId: scene.activeToken?.menu.id ?? null,
+        narrationPlaying:
+          scene.getDebugState().sensoryFeedback.narrationPlaying,
+        bufferStarts: probe.bufferStarts,
+        bufferStops: probe.bufferStops,
+        finished: scene.isFinished,
+      }
+
+      return {
+        action,
+        menuId,
+        startsBefore,
+        stopsBefore,
+        at1499,
+        at1500,
+      }
+    }
+
+    const normalTransitions = (
+      ['slice', 'capture', 'miss'] as const
+    ).map(advanceResolvedRound)
+
+    const currentToken = scene.activeToken
+    if (!currentToken) {
+      throw new Error('마지막 라운드 전환을 준비할 활성 음식이 없습니다.')
+    }
+    currentToken.tween.stop()
+    currentToken.rotationTween?.stop()
+    currentToken.container.destroy()
+    scene.activeToken = null
+    scene.rounds = scene.deck.slice(0, 19).map((menu, roundIndex) => ({
+      roundIndex,
+      menuId: menu.id,
+      action: { type: 'slice', accuracy: 88 },
+    }))
+    scene.spawnRound()
+    const resultTransition = advanceResolvedRound('miss')
+    scene.time.paused = false
+
+    return { normalTransitions, resultTransition }
+  })
+
+  for (const transition of checkpoints.normalTransitions) {
+    expect(transition.at1499).toMatchObject({
+      activeMenuId: null,
+      narrationPlaying: true,
+      bufferStarts: transition.startsBefore,
+      bufferStops: transition.stopsBefore,
+      finished: false,
+    })
+    expect(transition.at1500.activeMenuId).not.toBeNull()
+    expect(transition.at1500.activeMenuId).not.toBe(transition.menuId)
+    expect(transition.at1500).toMatchObject({
+      narrationPlaying: true,
+      bufferStarts: transition.startsBefore + 1,
+      bufferStops: transition.stopsBefore + 1,
+      finished: false,
+    })
+  }
+
+  expect(checkpoints.resultTransition.at1499).toMatchObject({
+    activeMenuId: null,
+    narrationPlaying: true,
+    bufferStarts: checkpoints.resultTransition.startsBefore,
+    bufferStops: checkpoints.resultTransition.stopsBefore,
+    finished: false,
+  })
+  expect(checkpoints.resultTransition.at1500).toMatchObject({
+    activeMenuId: null,
+    narrationPlaying: false,
+    bufferStarts: checkpoints.resultTransition.startsBefore,
+    bufferStops: checkpoints.resultTransition.stopsBefore + 1,
+    finished: true,
+  })
 })
 
 test('VOX를 끄면 재생 중 음성을 멈추되 현재 음식 말풍선은 유지한다', async ({

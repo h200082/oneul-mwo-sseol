@@ -637,6 +637,7 @@ test('첫 번째와 두 번째 음식을 연속으로 벨 수 있다', async ({
 test('실전 베기 스트릭은 3·5·8에서 연출되고 놓치면 초기화된다', async ({
   page,
 }, testInfo) => {
+  test.setTimeout(60_000)
   test.skip(
     testInfo.project.name === 'mobile-chromium',
     '연속 실제 포인터 베기와 배너 상태는 데스크톱 Chromium에서 검증합니다.',

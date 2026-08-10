@@ -16,6 +16,15 @@ export const LOGICAL_WIDTH = 390
 export const LOGICAL_HEIGHT = 844
 export const COMPACT_GAME_MAX_WIDTH = 360
 export const COMPACT_GAME_MAX_HEIGHT = 640
+export const MAX_GAME_RENDER_SCALE = 2
+
+export function resolveGameRenderScale(devicePixelRatio: number): number {
+  if (!Number.isFinite(devicePixelRatio) || devicePixelRatio <= 1) {
+    return 1
+  }
+
+  return Math.min(devicePixelRatio, MAX_GAME_RENDER_SCALE)
+}
 
 export function shouldUseCompactGameLayout(
   width: number,
@@ -40,9 +49,22 @@ export function createGame(
   sensoryFeedback: SensoryFeedback = NOOP_SENSORY_FEEDBACK,
   narrationPreference?: NarrationPreference,
 ): Phaser.Game {
+  const renderScale = resolveGameRenderScale(window.devicePixelRatio)
   const compactLayout = shouldUseCompactGameLayout(
     parent.clientWidth,
     parent.clientHeight,
+  )
+  const backingWidth = Math.max(
+    1,
+    Math.round(
+      (compactLayout ? parent.clientWidth : LOGICAL_WIDTH) * renderScale,
+    ),
+  )
+  const backingHeight = Math.max(
+    1,
+    Math.round(
+      (compactLayout ? parent.clientHeight : LOGICAL_HEIGHT) * renderScale,
+    ),
   )
   const scene = new PrototypeScene(
     launchOptions,
@@ -55,53 +77,102 @@ export function createGame(
   return new Phaser.Game({
     type: Phaser.AUTO,
     parent,
-    width: LOGICAL_WIDTH,
-    height: LOGICAL_HEIGHT,
+    width: backingWidth,
+    height: backingHeight,
     backgroundColor: '#111923',
     render: {
       antialias: true,
       roundPixels: false,
     },
     scale: {
-      mode: compactLayout ? Phaser.Scale.RESIZE : Phaser.Scale.FIT,
+      mode: compactLayout ? Phaser.Scale.NONE : Phaser.Scale.FIT,
       autoCenter: Phaser.Scale.CENTER_BOTH,
-      width: LOGICAL_WIDTH,
-      height: LOGICAL_HEIGHT,
+      width: backingWidth,
+      height: backingHeight,
+      ...(compactLayout ? { zoom: 1 / renderScale } : {}),
     },
     input: {
       activePointers: 2,
     },
     scene: [scene],
-    ...(compactLayout
-      ? {
-          callbacks: {
-            postBoot: (game: Phaser.Game) => {
-              installCompactCameraLayout(game, scene)
-            },
-          },
-        }
-      : {}),
+    callbacks: {
+      postBoot: (game: Phaser.Game) => {
+        installHighResolutionLayout(
+          game,
+          scene,
+          parent,
+          renderScale,
+          compactLayout,
+        )
+      },
+    },
   })
 }
 
-function installCompactCameraLayout(
+function installHighResolutionLayout(
   game: Phaser.Game,
   scene: Phaser.Scene,
+  parent: HTMLElement,
+  renderScale: number,
+  compactLayout: boolean,
 ): void {
+  const applyTextResolution = (gameObject: Phaser.GameObjects.GameObject): void => {
+    if (
+      gameObject instanceof Phaser.GameObjects.Text &&
+      gameObject.style.resolution !== renderScale
+    ) {
+      gameObject.setResolution(renderScale)
+    }
+  }
+
   const applyLayout = (): void => {
     const width = game.scale.width
     const height = game.scale.height
     const camera = scene.cameras.main
+    const uniformZoom = Math.min(
+      width / LOGICAL_WIDTH,
+      height / LOGICAL_HEIGHT,
+    )
 
     camera.setSize(width, height)
-    camera.setZoom(width / LOGICAL_WIDTH, height / LOGICAL_HEIGHT)
+    camera.setZoom(uniformZoom)
     camera.centerOn(LOGICAL_WIDTH / 2, LOGICAL_HEIGHT / 2)
+    scene.children.list.forEach(applyTextResolution)
   }
 
+  scene.events.on(Phaser.Scenes.Events.ADDED_TO_SCENE, applyTextResolution)
   applyLayout()
   scene.events.on(Phaser.Scenes.Events.CREATE, applyLayout)
   game.scale.on(Phaser.Scale.Events.RESIZE, applyLayout)
+
+  let compactResizeObserver: ResizeObserver | undefined
+  let compactWindowResizeHandler: (() => void) | undefined
+  if (compactLayout) {
+    const resizeCompactBackingStore = (): void => {
+      const width = Math.max(1, Math.round(parent.clientWidth * renderScale))
+      const height = Math.max(1, Math.round(parent.clientHeight * renderScale))
+
+      if (width !== game.scale.width || height !== game.scale.height) {
+        game.scale.resize(width, height)
+      }
+    }
+
+    if (typeof ResizeObserver === 'undefined') {
+      compactWindowResizeHandler = resizeCompactBackingStore
+      window.addEventListener('resize', compactWindowResizeHandler)
+    } else {
+      compactResizeObserver = new ResizeObserver(resizeCompactBackingStore)
+      compactResizeObserver.observe(parent)
+    }
+    resizeCompactBackingStore()
+  }
+
   game.events.once(Phaser.Core.Events.DESTROY, () => {
+    compactResizeObserver?.disconnect()
+    if (compactWindowResizeHandler) {
+      window.removeEventListener('resize', compactWindowResizeHandler)
+    }
+    scene.events.off(Phaser.Scenes.Events.ADDED_TO_SCENE, applyTextResolution)
     scene.events.off(Phaser.Scenes.Events.CREATE, applyLayout)
     game.scale.off(Phaser.Scale.Events.RESIZE, applyLayout)
   })
