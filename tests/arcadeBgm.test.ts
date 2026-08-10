@@ -127,13 +127,14 @@ describe('arcade BGM score', () => {
       ),
     ).toBeLessThanOrEqual(2_350)
   })
-  it('plays loudly while narration and every feedback cue retain priority', () => {
+  it('keeps the full BGM level under narration while feedback cues retain priority', () => {
     const maximumMusicVoiceGain = 0.3
     const roomSoundScale = 0.86
     const baseMusicPeak =
       maximumMusicVoiceGain * MUSIC_BUS_GAIN * SENSORY_MASTER_GAIN
-    const narrationDuckedPeak =
-      maximumMusicVoiceGain * MUSIC_DUCKED_BUS_GAIN * SENSORY_MASTER_GAIN
+    const narrationAndMusicPeak =
+      SENSORY_MASTER_GAIN *
+      (NARRATION_BUS_GAIN + maximumMusicVoiceGain * MUSIC_BUS_GAIN)
     const effectDuckedPeak =
       maximumMusicVoiceGain *
       MUSIC_EFFECT_DUCKED_BUS_GAIN *
@@ -145,25 +146,23 @@ describe('arcade BGM score', () => {
       SENSORY_MASTER_GAIN
 
     expect(MUSIC_BUS_GAIN).toBe(1.35)
-    expect(MUSIC_DUCKED_BUS_GAIN).toBe(0.03)
+    expect(MUSIC_DUCKED_BUS_GAIN).toBe(MUSIC_BUS_GAIN)
     expect(MUSIC_EFFECT_DUCKED_BUS_GAIN).toBe(0.02)
     expect(SENSORY_EFFECT_GAIN).toBe(2)
     expect(NARRATION_BUS_GAIN).toBe(0.68)
     expect(toDecibels(baseMusicPeak)).toBeGreaterThanOrEqual(-10.2)
     expect(toDecibels(baseMusicPeak)).toBeLessThanOrEqual(-9.8)
-    expect(
-      toDecibels(missWarningPeak) - toDecibels(narrationDuckedPeak),
-    ).toBeGreaterThanOrEqual(8)
+    expect(narrationAndMusicPeak).toBeLessThan(0.85)
     expect(
       toDecibels(missWarningPeak) - toDecibels(effectDuckedPeak),
     ).toBeGreaterThanOrEqual(12)
 
-    const loudestCombinedPeak =
+    const loudestEffectMixPeak =
       SENSORY_MASTER_GAIN *
       (NARRATION_BUS_GAIN +
         0.106 * SENSORY_EFFECT_GAIN +
-        maximumMusicVoiceGain * MUSIC_DUCKED_BUS_GAIN)
-    expect(loudestCombinedPeak).toBeLessThan(0.71)
+        maximumMusicVoiceGain * MUSIC_EFFECT_DUCKED_BUS_GAIN)
+    expect(loudestEffectMixPeak).toBeLessThan(0.71)
   })
   it('keeps the sustained bass audible on small mobile speakers', () => {
     const bassEvents = allEvents('opening').filter(

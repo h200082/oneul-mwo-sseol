@@ -129,7 +129,7 @@ test('현재 덱의 정적 오디오만 준비하고 첫 음식 음성 재생과
     narrationRequestCount: 1,
     narrationPlayCount: 1,
     narrationPlaying: true,
-    musicDucked: true,
+    musicDucked: false,
   })
 
   await assertDeckOnlyNarrationRequests(audit, AUDIO_FIRST_CASE.audioMenuIds)
