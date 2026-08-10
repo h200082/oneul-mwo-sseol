@@ -450,11 +450,11 @@ const PRIMED_GESTURE_MAX_MS = 2_500
 const MUSIC_SCHEDULER_INTERVAL_MS = 90
 const MUSIC_SCHEDULE_AHEAD_SECONDS = 0.32
 const MUSIC_SCHEDULE_MAX_STEPS = 8
-export const MUSIC_BUS_GAIN = 0.9
-export const MUSIC_DUCKED_BUS_GAIN = 0.18
-const MUSIC_DUCK_ATTACK_SECONDS = 0.045
+export const MUSIC_BUS_GAIN = 1.35
+export const MUSIC_DUCKED_BUS_GAIN = 0.03
+const MUSIC_DUCK_ATTACK_SECONDS = 0.008
 const MUSIC_DUCK_RELEASE_SECONDS = 0.12
-export const MUSIC_EFFECT_DUCKED_BUS_GAIN = 0.12
+export const MUSIC_EFFECT_DUCKED_BUS_GAIN = 0.02
 const MUSIC_EFFECT_DUCK_ATTACK_SECONDS = 0.008
 const MUSIC_EFFECT_DUCK_HOLD_SECONDS = 0.035
 const MUSIC_EFFECT_DUCK_RELEASE_SECONDS = 0.2
@@ -1575,6 +1575,10 @@ export class BrowserSensoryFeedbackOutput
         )
         const endAt = startAt + duration
         const attackEnd = startAt + Math.min(0.008, duration / 4)
+        const releaseStart = Math.max(
+          attackEnd,
+          endAt - Math.min(0.035, duration * 0.4),
+        )
         oscillator = context.createOscillator()
         noteGain = context.createGain()
         oscillator.type = event.wave
@@ -1585,6 +1589,10 @@ export class BrowserSensoryFeedbackOutput
         )
         noteGain.gain.setValueAtTime(0.0001, startAt)
         noteGain.gain.linearRampToValueAtTime(event.gain, attackEnd)
+        noteGain.gain.linearRampToValueAtTime(
+          Math.max(0.0001, event.gain * 0.55),
+          releaseStart,
+        )
         noteGain.gain.exponentialRampToValueAtTime(0.0001, endAt)
         oscillator.connect(noteGain)
         noteGain.connect(musicGain)

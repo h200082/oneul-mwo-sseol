@@ -848,7 +848,7 @@ describe('BrowserSensoryFeedbackOutput', () => {
       )
       expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(
         MUSIC_DUCKED_BUS_GAIN,
-        context.currentTime + 0.045,
+        context.currentTime + 0.008,
       )
 
       const firstSource = context.bufferSources[0]!

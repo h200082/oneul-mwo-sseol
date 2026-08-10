@@ -1,6 +1,7 @@
 import QRCode from 'qrcode'
 
 import chefCatImageUrl from '../assets/title/chef-cat-v1.webp'
+import nyangClawPawImageUrl from '../assets/tools/nyang-claw-paw.webp'
 import gimbapImageUrl from '../assets/title/title-food-gimbap.webp'
 import pizzaImageUrl from '../assets/title/title-food-pizza.webp'
 import ramyeonImageUrl from '../assets/title/title-food-ramyeon.webp'
@@ -46,6 +47,14 @@ import {
   type RoomGameProgressIdentity,
 } from '../game/gameProgress'
 import { PersonalBestStore } from '../game/personalBestStore'
+import {
+  CLASSIC_SLICE_TOOL_ID,
+  RAINBOW_SLICE_TOOL_ID,
+  isSliceToolId,
+  loadSelectedSliceTool,
+  saveSelectedSliceTool,
+  type SliceToolId,
+} from '../game/sliceTools'
 import {
   QrScannerError,
   scanRoomCodeFromCamera,
@@ -133,6 +142,7 @@ export interface AppDebugState {
   readonly roomSync: Readonly<AppDebugRoomSyncState>
   readonly sensoryFeedback: Readonly<SensoryFeedbackDebugState>
   readonly narrationPreference: Readonly<NarrationPreferenceState>
+  readonly selectedSliceTool: SliceToolId
   readonly gameVisible: boolean
   readonly startSoloGameForTest: (
     deckSeed: GameLaunchOptions['deckSeed'],
@@ -165,6 +175,7 @@ export class AppController {
   private readonly personalBestStore: PersonalBestStore
   private readonly sensoryFeedback: SensoryFeedback
   private readonly narrationPreference: NarrationPreference
+  private selectedSliceTool: SliceToolId
   private unsubscribeRoom: (() => void) | null = null
   private unsubscribeResults: (() => void) | null = null
   private countdownInterval: number | null = null
@@ -256,6 +267,7 @@ export class AppController {
       (roomGateway instanceof LocalRoomGateway ? 'local' : 'firebase')
     this.gameProgressStore = new RoomGameProgressStore(window.localStorage)
     this.personalBestStore = new PersonalBestStore(window.localStorage)
+    this.selectedSliceTool = loadSelectedSliceTool(readBrowserLocalStorage())
     this.sensoryFeedback =
       options.sensoryFeedback ?? createBrowserSensoryFeedback()
     this.narrationPreference =
@@ -503,6 +515,7 @@ export class AppController {
       }),
       sensoryFeedback: this.sensoryFeedback.getDebugState(),
       narrationPreference: this.narrationPreference.getState(),
+      selectedSliceTool: this.selectedSliceTool,
       gameVisible: !this.gameRoot.hidden,
       startSoloGameForTest: (deckSeed) => {
         if (!import.meta.env.DEV) {
@@ -596,6 +609,39 @@ export class AppController {
     )
     hapticsToggle.innerHTML =
       '<span class="feedback-toggle-copy" aria-hidden="true">VIB</span>'
+  }
+
+  private updateHomeSliceToolControls(): void {
+    const selectedLabel =
+      this.selectedSliceTool === RAINBOW_SLICE_TOOL_ID
+        ? '무지개 회칼'
+        : '냥손톱'
+    const summary = this.screenRoot.querySelector<HTMLElement>(
+      '[data-testid="selected-tool-summary"]',
+    )
+    if (summary) {
+      summary.textContent = `${selectedLabel} 장착 중`
+    }
+
+    for (const button of this.screenRoot.querySelectorAll<HTMLButtonElement>(
+      '[data-slice-tool]',
+    )) {
+      const toolId = button.dataset.sliceTool
+      if (!isSliceToolId(toolId)) {
+        continue
+      }
+
+      const isSelected = toolId === this.selectedSliceTool
+      const toolLabel =
+        toolId === RAINBOW_SLICE_TOOL_ID ? '무지개 회칼' : '냥손톱'
+      button.setAttribute('aria-pressed', String(isSelected))
+      button.setAttribute(
+        'aria-label',
+        `${toolLabel} ${isSelected ? '장착 중' : '사용하기'}`,
+      )
+      button.textContent = isSelected ? '장착 중' : '사용하기'
+      button.closest('.tool-card')?.classList.toggle('is-equipped', isSelected)
+    }
   }
 
   private renderHome(invitedRoomCode: string | null = null): void {
@@ -719,6 +765,151 @@ export class AppController {
             </button>
           </div>
         </section>
+        ${
+          isInviteMode
+            ? ''
+            : `
+              <section
+                class="collection-shelf"
+                data-testid="collection-shelf"
+                aria-label="업적과 도구"
+              >
+                <p class="collection-heading">
+                  <span>COLLECTION</span>
+                  <small>새 콘텐츠 미리보기</small>
+                </p>
+
+                <details
+                  class="collection-panel achievement-panel"
+                  data-testid="achievement-panel"
+                >
+                  <summary>
+                    <span>업적</span>
+                    <small>칭호 1개 공개</small>
+                  </summary>
+                  <div class="collection-panel-content achievement-grid">
+                    <article
+                      class="collection-card achievement-card"
+                      data-testid="achievement-sushi-master"
+                    >
+                      <div class="collection-card-top">
+                        <span class="achievement-emblem" aria-hidden="true">★</span>
+                        <span class="collection-status">업데이트 예정</span>
+                      </div>
+                      <p class="collection-card-kicker">TITLE 01</p>
+                      <h3>초밥 마스터</h3>
+                      <p>초밥 5회 포획 성공</p>
+                      <small>추후 칭호 업적 미션으로 추가됩니다.</small>
+                    </article>
+
+                    <article class="collection-card collection-placeholder">
+                      <span class="placeholder-mark" aria-hidden="true">?</span>
+                      <h3>???</h3>
+                      <p>새로운 칭호</p>
+                      <small>업데이트 시 추가</small>
+                    </article>
+                  </div>
+                </details>
+
+                <details
+                  class="collection-panel tool-panel"
+                  data-testid="tool-panel"
+                >
+                  <summary>
+                    <span>도구</span>
+                    <small data-testid="selected-tool-summary">
+                      ${
+                        this.selectedSliceTool === RAINBOW_SLICE_TOOL_ID
+                          ? '무지개 회칼'
+                          : '냥손톱'
+                      } 장착 중
+                    </small>
+                  </summary>
+                  <div class="collection-panel-content tool-grid">
+                    <article
+                      class="collection-card tool-card${
+                        this.selectedSliceTool === CLASSIC_SLICE_TOOL_ID
+                          ? ' is-equipped'
+                          : ''
+                      }"
+                      data-slice-tool-card="${CLASSIC_SLICE_TOOL_ID}"
+                    >
+                      <div class="tool-preview tool-preview-classic" aria-hidden="true">
+                        <span class="tool-trail"></span>
+                        <img
+                          class="tool-paw-image"
+                          data-testid="nyang-claw-paw"
+                          src="${nyangClawPawImageUrl}"
+                          alt=""
+                          draggable="false"
+                        />
+                      </div>
+                      <p class="collection-card-kicker">BASIC</p>
+                      <h3>냥손톱</h3>
+                      <p>말랑한 발바닥으로 민트빛 베기</p>
+                      <button
+                        class="button button-secondary tool-select-button"
+                        type="button"
+                        data-testid="select-classic-knife"
+                        data-slice-tool="${CLASSIC_SLICE_TOOL_ID}"
+                        aria-pressed="${
+                          this.selectedSliceTool === CLASSIC_SLICE_TOOL_ID
+                        }"
+                      >${
+                        this.selectedSliceTool === CLASSIC_SLICE_TOOL_ID
+                          ? '장착 중'
+                          : '사용하기'
+                      }</button>
+                    </article>
+
+                    <article
+                      class="collection-card tool-card tool-card-rainbow${
+                        this.selectedSliceTool === RAINBOW_SLICE_TOOL_ID
+                          ? ' is-equipped'
+                          : ''
+                      }"
+                      data-testid="tool-rainbow-knife"
+                      data-slice-tool-card="${RAINBOW_SLICE_TOOL_ID}"
+                    >
+                      <div class="tool-preview tool-preview-rainbow" aria-hidden="true">
+                        <span class="tool-trail"></span>
+                        <span class="tool-knife"></span>
+                      </div>
+                      <p class="collection-card-kicker">SPECIAL</p>
+                      <h3>무지개 회칼</h3>
+                      <p>드래그할 때 일곱 빛깔 궤적</p>
+                      <div class="tool-unlock-note">
+                        <span>추후 해금 조건</span>
+                        <strong>초밥 마스터 칭호</strong>
+                        <small>초밥 5회 포획 성공 시 사용 가능</small>
+                      </div>
+                      <p class="tool-preview-note">현재 버전에서는 바로 체험할 수 있어요.</p>
+                      <button
+                        class="button button-accent tool-select-button"
+                        type="button"
+                        data-testid="select-rainbow-knife"
+                        data-slice-tool="${RAINBOW_SLICE_TOOL_ID}"
+                        aria-pressed="${
+                          this.selectedSliceTool === RAINBOW_SLICE_TOOL_ID
+                        }"
+                      >${
+                        this.selectedSliceTool === RAINBOW_SLICE_TOOL_ID
+                          ? '장착 중'
+                          : '사용하기'
+                      }</button>
+                    </article>
+
+                    <article class="collection-card collection-placeholder tool-placeholder">
+                      <span class="placeholder-mark" aria-hidden="true">?</span>
+                      <h3>???</h3>
+                      <p>새로운 도구</p>
+                      <small>업데이트 시 추가</small>
+                    </article>
+                  </div>
+                </details>
+              </section>
+            `
+        }
 
         ${
           isInviteMode
@@ -841,6 +1032,23 @@ export class AppController {
       )
       this.updateHomeFeedbackControls()
     })
+
+    for (const button of this.screenRoot.querySelectorAll<HTMLButtonElement>(
+      '[data-slice-tool]',
+    )) {
+      button.addEventListener('click', () => {
+        const toolId = button.dataset.sliceTool
+        if (!isSliceToolId(toolId)) {
+          return
+        }
+
+        this.selectedSliceTool = toolId
+        saveSelectedSliceTool(readBrowserLocalStorage(), toolId)
+        this.updateHomeSliceToolControls()
+        this.sensoryFeedback.trigger('ui-confirm')
+      })
+    }
+    this.updateHomeSliceToolControls()
 
     this.query<HTMLButtonElement>('[data-testid="solo-start"]').addEventListener(
       'click',
@@ -2353,7 +2561,10 @@ export class AppController {
     this.activeRoomResultFlow = null
     this.clearCountdown()
     this.screenRoot.hidden = true
-    this.gameHost.start(options)
+    this.gameHost.start({
+      ...options,
+      sliceTool: this.selectedSliceTool,
+    })
   }
   private createRoomGameLaunchOptions(
     room: StartedRoom,
@@ -3785,6 +3996,14 @@ export class AppController {
       throw new Error(`화면 요소를 찾을 수 없습니다: ${selector}`)
     }
     return element
+  }
+}
+
+function readBrowserLocalStorage(): Storage | null {
+  try {
+    return window.localStorage
+  } catch {
+    return null
   }
 }
 
