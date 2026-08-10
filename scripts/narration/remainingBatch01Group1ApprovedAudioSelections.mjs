@@ -1,0 +1,241 @@
+export const REMAINING_BATCH_01_GROUP_1_APPROVAL_QUOTE =
+  '너무 괜찮아, 그동안 만들던 방식중 이렇게 모두 퀄리티가 괜찮게 나온 적은 처음이라 굉장히 만족스러워, 김치볶음밥 처음 빈 공백 편집해서 줄이기만 하면 될 거 같아.'
+
+export const REMAINING_BATCH_01_GROUP_1_KIMCHI_VOICE_APPROVAL_QUOTE =
+  '특히 김치볶음밥의 여자 목소리는 매우 자연스러워서 좋은 거 같아.'
+
+export const REMAINING_BATCH_01_GROUP_1_SOURCE_MANIFEST = Object.freeze({
+  path: 'tmp/narration-preview/remaining-batch-01/remaining-batch-01-manifest.json',
+  byteLength: 42_007,
+  sha256: 'C2A6A2846C37A76C1FCF4A8E7F1E7F6255248D007D0712288EC934736CBF107E',
+  schemaVersion: 2,
+  generatedAt: '2026-08-10T04:18:00.701Z',
+  region: 'southeastasia',
+  outputFormat: 'audio-24khz-160kbitrate-mono-mp3',
+  totalSynthesisRequests: 28,
+  retries: 0,
+  postprocessingApplied: false,
+})
+
+export const REMAINING_BATCH_01_GROUP_1_APPROVED_NARRATION_SELECTIONS =
+  Object.freeze([
+    selection({
+      menuId: 'curry-rice',
+      catalogText: '한 번 끓여 세 끼를 지배한다!',
+      byteLength: 55_680,
+      sha256: '91A7F79ECC3A54D9524DC373C8BA4F6383DC12FB5751E6319A365D3AD2E48116',
+      mpegFrameCount: 116,
+      exactDurationSeconds: 2.784,
+      model: 'MAI-Voice-2-Flash',
+      voiceShortName: 'ko-KR-Junho:MAI-Voice-2-Flash',
+      style: 'joyful',
+      styleDegree: 0.54,
+      rate: '+24%',
+      pitch: '+0%',
+      segments: ['한 번 끓여 ', '세 끼를 지배한다!'],
+    }),
+    selection({
+      menuId: 'omurice',
+      catalogText: '밥이 계란으로 신분 세탁!',
+      byteLength: 35_520,
+      sha256: 'A910FEFECA377DE7BA1FE131D79056641FCA5F48BAA79D9C20580B0047220C02',
+      mpegFrameCount: 74,
+      exactDurationSeconds: 1.776,
+      model: 'MAI-Voice-2-Flash',
+      voiceShortName: 'ko-KR-Junho:MAI-Voice-2-Flash',
+      style: 'determined',
+      styleDegree: 0.46,
+      rate: '+22%',
+      pitch: '-1%',
+      segments: ['밥이 계란으로 신분 세탁!'],
+    }),
+    selection({
+      menuId: 'fried-rice',
+      catalogText: '냉장고 올스타전!',
+      byteLength: 35_520,
+      sha256: 'C8616E855A176B6E55E595CAEF0585E86565A16934965B419CF523C1719309D5',
+      mpegFrameCount: 74,
+      exactDurationSeconds: 1.776,
+      model: 'MAI-Voice-2-Flash',
+      voiceShortName: 'ko-KR-Junho:MAI-Voice-2-Flash',
+      style: 'joyful',
+      styleDegree: 0.52,
+      rate: '+18%',
+      pitch: '+0%',
+      segments: ['냉장고 올스타전!'],
+    }),
+    selection({
+      menuId: 'pork-cutlet',
+      catalogText: '돈가스 먹으러 가자? 일단 의심해!',
+      byteLength: 45_600,
+      sha256: '58B19433D5D67C1B42DE99B26E8CFAFCA0B18690FB8AFA7A0608AD3D75D682BA',
+      mpegFrameCount: 95,
+      exactDurationSeconds: 2.28,
+      model: 'MAI-Voice-2',
+      voiceShortName: 'ko-KR-Junho:MAI-Voice-2',
+      style: 'joyful',
+      styleDegree: 0.44,
+      rate: '+20%',
+      pitch: '-1%',
+      segments: ['돈가스 먹으러 가자? ', '일단 의심해!'],
+    }),
+    selection({
+      menuId: 'sushi',
+      catalogText: '그릇은 쌓이고 통장은 비어간다!',
+      byteLength: 55_200,
+      sha256: '9DBEF6EA2FAE56EE7E0954FFC039CD52F8FB9333707DE3EC9F1A8AC0F342CBD9',
+      mpegFrameCount: 115,
+      exactDurationSeconds: 2.76,
+      model: 'MAI-Voice-2-Flash',
+      voiceShortName: 'ko-KR-Junho:MAI-Voice-2-Flash',
+      style: 'joyful',
+      styleDegree: 0.5,
+      rate: '+22%',
+      pitch: '-1%',
+      segments: ['그릇은 쌓이고 ', '통장은 비어간다!'],
+    }),
+    selection({
+      menuId: 'bibim-guksu',
+      catalogText: '면은 꼬이고 입맛은 풀린다!',
+      byteLength: 56_640,
+      sha256: '627E2A07DAC7937F08EC4DE4E81E29B8089960AFB70BD35D9B6D19BEE8C3E7EA',
+      mpegFrameCount: 118,
+      exactDurationSeconds: 2.832,
+      model: 'MAI-Voice-2-Flash',
+      voiceShortName: 'ko-KR-Junho:MAI-Voice-2-Flash',
+      style: 'joyful',
+      styleDegree: 0.5,
+      rate: '+22%',
+      pitch: '+0%',
+      segments: ['면은 꼬이고 ', '입맛은 풀린다!'],
+    }),
+  ])
+
+export const REMAINING_BATCH_01_GROUP_1_CONDITIONAL_KIMCHI_FRIED_RICE =
+  Object.freeze({
+    menuId: 'kimchi-fried-rice',
+    catalogText: '신김치의 화려한 재데뷔!',
+    spokenText: '신김치의 화려한 재데뷔!',
+    sourcePreviewPath:
+      'tmp/narration-preview/remaining-batch-01/kimchi-fried-rice.mp3',
+    byteLength: 67_200,
+    sha256: 'C952BC5274509A8627242B1D45FB4347E4E93F97F83B2CB2C4A67AB6BF9AF053',
+    mpegFrameCount: 140,
+    exactDurationSeconds: 3.36,
+    model: 'MAI-Voice-2-Flash',
+    voiceId: 'haena',
+    voiceShortName: 'ko-KR-Haena:MAI-Voice-2-Flash',
+    style: 'joyful',
+    styleDegree: 0.48,
+    rate: '+20%',
+    pitch: '-1%',
+    structure: 'one-block',
+    segments: Object.freeze(['신김치의 화려한 재데뷔!']),
+    humanApproved: false,
+    conditionalHumanApproval: true,
+    approvalState: 'leading-silence-trim-required',
+    trimInstruction: '김치볶음밥 처음 빈 공백 편집해서 줄이기만 하면 될 거 같아.',
+    approvalEvidence: Object.freeze({
+      userStatement: REMAINING_BATCH_01_GROUP_1_APPROVAL_QUOTE,
+      performanceLockStatement:
+        REMAINING_BATCH_01_GROUP_1_KIMCHI_VOICE_APPROVAL_QUOTE,
+      reviewedAt: '2026-08-10',
+    }),
+    deploymentStatus: 'source-withheld-after-approved-local-trim',
+    currentlyDeployed: false,
+    runtimeIntegrationAttempted: false,
+  })
+
+export const REMAINING_BATCH_01_GROUP_1_APPROVED_KIMCHI_FRIED_RICE_TRIM =
+  Object.freeze({
+    menuId: 'kimchi-fried-rice',
+    catalogText: '신김치의 화려한 재데뷔!',
+    spokenText: '신김치의 화려한 재데뷔!',
+    sourceRaw: REMAINING_BATCH_01_GROUP_1_CONDITIONAL_KIMCHI_FRIED_RICE,
+    sourceTrimCandidatePath:
+      'tmp/narration-preview/kimchi-fried-rice-leading-gap-trim-01/kimchi-fried-rice-leading-gap-trim-01.wav',
+    targetAssetPath: 'src/assets/narration/kimchi-fried-rice.wav',
+    trimManifest: Object.freeze({
+      path:
+        'tmp/narration-preview/kimchi-fried-rice-leading-gap-trim-01/kimchi-fried-rice-leading-gap-trim-01-manifest.json',
+      byteLength: 5_364,
+      sha256:
+        '42CC96B60AC2A07F26135C9B36E98DAD76FEA1223C7F4AFF7101936106634D71',
+      schemaVersion: 1,
+      generatedAt: '2026-08-10T04:37:53.735Z',
+    }),
+    byteLength: 225_828,
+    sha256:
+      '0E322E3B646A67E6552B20CACBC3349F9DB8537F1408B76A9F176102E4C2CC3E',
+    container: 'WAVE',
+    encoding: 'IEEE 32-bit float PCM',
+    sampleRate: 24_000,
+    channels: 1,
+    sampleCount: 56_446,
+    exactDurationSeconds: 2.351916666666667,
+    retainedPcmSha256:
+      '2826C6EFAE041B5D37C41D134BB3C75163FDCD05F388438003FFF0E6CB500D41',
+    trim: Object.freeze({
+      mode: 'leading-only',
+      removedLeadingSamples: 24_194,
+      removedLeadingSeconds: 1.0080833333333334,
+      removedTailSamples: 0,
+      retainedNaturalHeadSamples: 2_566,
+      retainedNaturalHeadSeconds: 0.10691666666666666,
+      fadesApplied: false,
+      normalized: false,
+      resampled: false,
+      gainApplied: false,
+      retainedPcmBitExact: true,
+      sourceOutputMismatchSamples: 0,
+    }),
+    model: 'MAI-Voice-2-Flash',
+    voiceId: 'haena',
+    voiceShortName: 'ko-KR-Haena:MAI-Voice-2-Flash',
+    style: 'joyful',
+    styleDegree: 0.48,
+    rate: '+20%',
+    pitch: '-1%',
+    structure: 'one-block',
+    segments: Object.freeze(['신김치의 화려한 재데뷔!']),
+    humanApproved: true,
+    approvalState: 'conditional-leading-gap-trim-satisfied',
+    approvalEvidence: Object.freeze({
+      userStatement: REMAINING_BATCH_01_GROUP_1_APPROVAL_QUOTE,
+      performanceLockStatement:
+        REMAINING_BATCH_01_GROUP_1_KIMCHI_VOICE_APPROVAL_QUOTE,
+      reviewedAt: '2026-08-10',
+    }),
+    deploymentStatus: 'active',
+    currentlyDeployed: true,
+    byteCopyVerified: true,
+    postprocessingApplied: 'leading-only-local-pcm-trim',
+    additionalAzureRequests: 0,
+  })
+
+function selection(value) {
+  return Object.freeze({
+    ...value,
+    spokenText: value.catalogText,
+    sourcePreviewPath:
+      `tmp/narration-preview/remaining-batch-01/${value.menuId}.mp3`,
+    targetAssetPath:
+      `src/assets/narration/${value.menuId}-remaining-batch-01.mp3`,
+    voiceId: 'junho',
+    structure:
+      value.segments.length === 1 ? 'one-block' : 'adjacent-two-block',
+    segments: Object.freeze([...value.segments]),
+    sourceManifest: REMAINING_BATCH_01_GROUP_1_SOURCE_MANIFEST,
+    humanApproved: true,
+    approvalState: 'unconditional-raw-take-approved',
+    approvalEvidence: Object.freeze({
+      userStatement: REMAINING_BATCH_01_GROUP_1_APPROVAL_QUOTE,
+      reviewedAt: '2026-08-10',
+    }),
+    deploymentStatus: 'active',
+    currentlyDeployed: true,
+    byteCopyVerified: true,
+    postprocessingApplied: false,
+    additionalAzureRequests: 0,
+  })
+}

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createPlayerGameResult,
   createPlayerGameResultReporter,
+  resolvePersonalBestPresentation,
   type GameLaunchOptions,
 } from '../src/game/gameTypes'
 
@@ -107,6 +108,26 @@ describe('player game result', () => {
     }).not.toThrow()
   })
 
+  it('never reports a result for the non-scoring tutorial launch', () => {
+    const handler = vi.fn()
+    const now = vi.fn(() => 1_754_000_123_456)
+    const report = createPlayerGameResultReporter(
+      {
+        mode: 'solo',
+        launchMode: 'tutorial',
+        mealTime: 'lunch',
+        deckSeed: 'tutorial-seed',
+      },
+      handler,
+      now,
+    )
+
+    report({ score: 100, capturedMenuIds: ['gimbap'] })
+
+    expect(handler).not.toHaveBeenCalled()
+    expect(now).not.toHaveBeenCalled()
+  })
+
   it('does not retry a handler that throws', () => {
     const handler = vi.fn(() => {
       throw new Error('storage unavailable')
@@ -124,5 +145,34 @@ describe('player game result', () => {
       report({ score: 71, capturedMenuIds: [] }),
     ).not.toThrow()
     expect(handler).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('solo personal best presentation', () => {
+  it('labels a run without a previous device score as the first record', () => {
+    expect(resolvePersonalBestPresentation(82.4)).toEqual({
+      bestScore: 82.4,
+      status: 'first',
+    })
+  })
+
+  it('labels only a strictly higher score as NEW', () => {
+    expect(resolvePersonalBestPresentation(91.2, 88.7)).toEqual({
+      bestScore: 91.2,
+      status: 'new',
+    })
+    expect(resolvePersonalBestPresentation(88.7, 88.7)).toEqual({
+      bestScore: 88.7,
+      status: 'existing',
+    })
+  })
+
+  it('keeps the previous best when the current score is lower', () => {
+    const presentation = resolvePersonalBestPresentation(74.5, 93.1)
+    expect(presentation).toEqual({
+      bestScore: 93.1,
+      status: 'existing',
+    })
+    expect(Object.isFrozen(presentation)).toBe(true)
   })
 })

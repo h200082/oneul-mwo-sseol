@@ -32,14 +32,16 @@ function startedRoom() {
 }
 
 describe('Firestore result deadline codec', () => {
-  it('writes transition schema v1 and derives its deadline on read', () => {
+  it('writes schema v3 with its exact deadline', () => {
     const room = startedRoom()
     const encoded = encodeFirestoreRoom(room)
 
-    expect(FIRESTORE_ROOM_LATEST_SCHEMA_VERSION).toBe(2)
-    expect(FIRESTORE_ROOM_WRITE_SCHEMA_VERSION).toBe(1)
-    expect(encoded.schemaVersion).toBe(1)
-    expect(encoded.start?.resultDeadlineAt).toBeUndefined()
+    expect(FIRESTORE_ROOM_LATEST_SCHEMA_VERSION).toBe(3)
+    expect(FIRESTORE_ROOM_WRITE_SCHEMA_VERSION).toBe(3)
+    expect(encoded.schemaVersion).toBe(3)
+    expect(encoded.start?.resultDeadlineAt).toBe(
+      50_000 + ROOM_RESULT_WINDOW_MS,
+    )
     expect(decodeFirestoreRoom(encoded, room.code)).toEqual(room)
   })
 
@@ -62,9 +64,12 @@ describe('Firestore result deadline codec', () => {
   it('rejects a missing or tampered schema v2 deadline', () => {
     const room = startedRoom()
     const encoded = encodeFirestoreRoom(room)
+    const { resultDeadlineAt: _resultDeadlineAt, ...startWithoutDeadline } =
+      encoded.start!
     const missingDeadline = {
       ...encoded,
       schemaVersion: 2 as const,
+      start: startWithoutDeadline,
     }
 
     expect(() =>

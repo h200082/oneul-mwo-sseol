@@ -1,24 +1,11 @@
-import friedChickenImageUrl from '../assets/food/fried-chicken-v2.webp'
-import galbitangImageUrl from '../assets/food/galbitang-v2.webp'
-import gimbapImageUrl from '../assets/food/gimbap-v2.webp'
-import homeStyleBaekbanImageUrl from '../assets/food/home-style-baekban-v2.webp'
-import kimchiJjigaeImageUrl from '../assets/food/kimchi-jjigae.webp'
-import omuriceImageUrl from '../assets/food/omurice-v2.webp'
-import pizzaImageUrl from '../assets/food/pizza.webp'
-import ramyeonImageUrl from '../assets/food/ramyeon-v2.webp'
-import sandwichImageUrl from '../assets/food/sandwich-v2.webp'
-import sushiImageUrl from '../assets/food/sushi.webp'
-import tteokbokkiImageUrl from '../assets/food/tteokbokki-v2.webp'
 import {
   createAlphaSilhouetteMask,
   type AlphaSilhouetteMask,
 } from '../domain/alphaSilhouette'
+import { MENU_VISUALS, type MenuVisual } from './menuVisualManifest'
 
-export interface MenuVisual {
-  readonly menuId: string
-  readonly textureKey: `food:${string}`
-  readonly imageUrl: string
-}
+export { MENU_VISUALS }
+export type { MenuVisual }
 
 export interface ContainedSize {
   readonly width: number
@@ -54,63 +41,6 @@ export function calculateContainedSize(
   return { width: sourceWidth * scale, height: sourceHeight * scale }
 }
 
-export const MENU_VISUALS: readonly MenuVisual[] = Object.freeze([
-  {
-    menuId: 'ramyeon',
-    textureKey: 'food:ramyeon',
-    imageUrl: ramyeonImageUrl,
-  },
-  {
-    menuId: 'kimchi-jjigae',
-    textureKey: 'food:kimchi-jjigae',
-    imageUrl: kimchiJjigaeImageUrl,
-  },
-  {
-    menuId: 'sushi',
-    textureKey: 'food:sushi',
-    imageUrl: sushiImageUrl,
-  },
-  {
-    menuId: 'fried-chicken',
-    textureKey: 'food:fried-chicken',
-    imageUrl: friedChickenImageUrl,
-  },
-  {
-    menuId: 'pizza',
-    textureKey: 'food:pizza',
-    imageUrl: pizzaImageUrl,
-  },
-  {
-    menuId: 'galbitang',
-    textureKey: 'food:galbitang',
-    imageUrl: galbitangImageUrl,
-  },
-  {
-    menuId: 'omurice',
-    textureKey: 'food:omurice',
-    imageUrl: omuriceImageUrl,
-  },
-  {
-    menuId: 'gimbap',
-    textureKey: 'food:gimbap',
-    imageUrl: gimbapImageUrl,
-  },
-  {
-    menuId: 'sandwich',
-    textureKey: 'food:sandwich',
-    imageUrl: sandwichImageUrl,
-  },
-  {
-    menuId: 'tteokbokki',
-    textureKey: 'food:tteokbokki',
-    imageUrl: tteokbokkiImageUrl,
-  },
-  {
-    menuId: 'home-style-baekban',
-    textureKey: 'food:home-style-baekban',
-    imageUrl: homeStyleBaekbanImageUrl,
-  },
-])
 
 const MENU_VISUAL_BY_ID = new Map(
   MENU_VISUALS.map((visual) => [visual.menuId, visual]),
@@ -123,55 +53,92 @@ export function getMenuVisual(
 }
 
 export const MENU_ALPHA_MASK_RESOLUTION = 128
+export const MENU_VISUAL_LOAD_DEADLINE_MS = 1_200
+export const MENU_VISUAL_DECODE_DEADLINE_MS = 600
+
+const CANONICAL_SHAPE_RADIUS_PERCENT = 84
 
 const PRELOADED_MENU_IMAGES = new Map<string, HTMLImageElement>()
-const PRELOADED_MENU_ALPHA_MASKS = new Map<string, AlphaSilhouetteMask>()
-let preloadPromise: Promise<void> | null = null
+const MENU_VISUAL_PRELOAD_TASKS = new Map<string, Promise<void>>()
+const CANONICAL_MENU_ALPHA_MASK = createCanonicalMenuAlphaMask()
+
+export interface CanonicalMenuGameplayGeometry {
+  readonly renderBounds: ContainedSize
+  readonly artworkCenter: {
+    readonly x: number
+    readonly y: number
+  }
+  readonly captureCenter: {
+    readonly x: number
+    readonly y: number
+  }
+  readonly alphaMask: Readonly<AlphaSilhouetteMask>
+}
 
 /**
- * Downloads and decodes the visual slice before the room countdown.
- * Phaser can then register the decoded images synchronously at game start, so
- * one player's network speed cannot delay their first round after `startAt`.
+ * Downloads, decodes, and measures only the requested visual slice before a
+ * game starts. Omitting `menuIds` preserves the original all-visuals API.
  * Failed images intentionally fall back to the existing colored menu token.
  */
-export function preloadMenuVisuals(): Promise<void> {
+export function preloadMenuVisuals(
+  menuIds?: readonly string[],
+): Promise<void> {
   if (typeof Image === 'undefined') {
     return Promise.resolve()
   }
 
-  preloadPromise ??= Promise.allSettled(
-    MENU_VISUALS.map(async (visual) => {
-      const image = new Image()
-      image.decoding = 'async'
+  const visuals =
+    menuIds === undefined
+      ? MENU_VISUALS
+      : [...new Set(menuIds)]
+          .map((menuId) => getMenuVisual(menuId))
+          .filter((visual): visual is MenuVisual => visual !== undefined)
 
-      await new Promise<void>((resolve, reject) => {
-        image.addEventListener('load', () => resolve(), { once: true })
-        image.addEventListener(
-          'error',
-          () => reject(new Error(`Failed to load ${visual.menuId}.`)),
-          { once: true },
-        )
-        image.src = visual.imageUrl
-      })
+  return Promise.allSettled(visuals.map(preloadMenuVisual)).then(
+    () => undefined,
+  )
+}
 
-      try {
-        await image.decode()
-      } catch {
-        if (image.naturalWidth === 0) {
-          return
-        }
-      }
+function preloadMenuVisual(visual: MenuVisual): Promise<void> {
+  if (PRELOADED_MENU_IMAGES.has(visual.menuId)) {
+    return Promise.resolve()
+  }
 
-      PRELOADED_MENU_IMAGES.set(visual.menuId, image)
+  const pending = MENU_VISUAL_PRELOAD_TASKS.get(visual.menuId)
+  if (pending) {
+    return pending
+  }
 
-      const alphaMask = createMenuAlphaMask(image)
-      if (alphaMask && alphaMask.totalWeight > 0) {
-        PRELOADED_MENU_ALPHA_MASKS.set(visual.menuId, alphaMask)
-      }
-    }),
-  ).then(() => undefined)
+  const task = loadMenuVisual(visual).catch((error: unknown) => {
+    MENU_VISUAL_PRELOAD_TASKS.delete(visual.menuId)
+    throw error
+  })
+  MENU_VISUAL_PRELOAD_TASKS.set(visual.menuId, task)
+  return task
+}
 
-  return preloadPromise
+async function loadMenuVisual(visual: MenuVisual): Promise<void> {
+  const image = new Image()
+  image.decoding = 'async'
+
+  await waitForImageLoad(image, visual)
+
+  try {
+    await waitForTaskWithDeadline(
+      image.decode(),
+      MENU_VISUAL_DECODE_DEADLINE_MS,
+      `Timed out decoding ${visual.menuId}.`,
+    )
+  } catch (error) {
+    if (error instanceof MenuVisualDeadlineError) {
+      throw error
+    }
+    if (image.naturalWidth === 0) {
+      throw new Error(`Failed to decode ${visual.menuId}.`)
+    }
+  }
+
+  PRELOADED_MENU_IMAGES.set(visual.menuId, image)
 }
 
 export function getPreloadedMenuImage(
@@ -183,42 +150,144 @@ export function getPreloadedMenuImage(
 export function getPreloadedMenuAlphaMask(
   menuId: string,
 ): AlphaSilhouetteMask | undefined {
-  return PRELOADED_MENU_ALPHA_MASKS.get(menuId)
+  return getCanonicalMenuAlphaMask(menuId)
 }
 
-function createMenuAlphaMask(
-  image: HTMLImageElement,
+export function getCanonicalMenuAlphaMask(
+  menuId: string,
 ): AlphaSilhouetteMask | undefined {
-  if (typeof document === 'undefined') {
+  return MENU_VISUAL_BY_ID.has(menuId)
+    ? CANONICAL_MENU_ALPHA_MASK
+    : undefined
+}
+
+/**
+ * Gameplay geometry comes only from versioned manifest data and this bundled
+ * canonical mask. Image decoding and Canvas readback are deliberately absent,
+ * so every client judges the same gesture even when artwork falls back.
+ */
+export function getCanonicalMenuGameplayGeometry(
+  menuId: string,
+  maximumWidth: number,
+  maximumHeight: number,
+  artworkYOffset = -7,
+): CanonicalMenuGameplayGeometry | undefined {
+  const visual = getMenuVisual(menuId)
+  if (!visual) {
     return undefined
   }
 
-  try {
-    const canvas = document.createElement('canvas')
-    canvas.width = MENU_ALPHA_MASK_RESOLUTION
-    canvas.height = MENU_ALPHA_MASK_RESOLUTION
-    const context = canvas.getContext('2d', { willReadFrequently: true })
-    if (!context) {
-      return undefined
-    }
+  const gameplayOffset = visual.gameplayOffset ?? { x: 0, y: 0 }
+  return {
+    renderBounds: calculateContainedSize(
+      visual.sourceWidth,
+      visual.sourceHeight,
+      maximumWidth,
+      maximumHeight,
+    ),
+    artworkCenter: {
+      x: gameplayOffset.x,
+      y: artworkYOffset + gameplayOffset.y,
+    },
+    captureCenter: {
+      x: gameplayOffset.x,
+      y: gameplayOffset.y,
+    },
+    alphaMask: CANONICAL_MENU_ALPHA_MASK,
+  }
+}
 
-    context.clearRect(0, 0, canvas.width, canvas.height)
-    context.drawImage(image, 0, 0, canvas.width, canvas.height)
-    const rgba = context.getImageData(
-      0,
-      0,
-      canvas.width,
-      canvas.height,
-    ).data
-    const alpha = new Uint8Array(canvas.width * canvas.height)
-    for (let pixel = 0; pixel < alpha.length; pixel += 1) {
-      alpha[pixel] = rgba[pixel * 4 + 3]!
-    }
+function waitForImageLoad(
+  image: HTMLImageElement,
+  visual: MenuVisual,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (result: 'load' | 'error' | 'timeout'): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      globalThis.clearTimeout(timeout)
+      image.removeEventListener('load', handleLoad)
+      image.removeEventListener('error', handleError)
 
-    return createAlphaSilhouetteMask(canvas.width, canvas.height, alpha)
-  } catch {
-    // Canvas readback can fail in privacy-restricted browsers. Artwork still
-    // renders and gameplay safely falls back to the established circle.
-    return undefined
+      if (result === 'load') {
+        resolve()
+      } else if (result === 'timeout') {
+        reject(
+          new MenuVisualDeadlineError(
+            `Timed out loading ${visual.menuId}.`,
+          ),
+        )
+      } else {
+        reject(new Error(`Failed to load ${visual.menuId}.`))
+      }
+    }
+    const handleLoad = (): void => finish('load')
+    const handleError = (): void => finish('error')
+    const timeout = globalThis.setTimeout(
+      () => finish('timeout'),
+      MENU_VISUAL_LOAD_DEADLINE_MS,
+    )
+
+    image.addEventListener('load', handleLoad, { once: true })
+    image.addEventListener('error', handleError, { once: true })
+    image.src = visual.imageUrl
+  })
+}
+
+function waitForTaskWithDeadline(
+  task: Promise<void>,
+  deadlineMs: number,
+  timeoutMessage: string,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (callback: () => void): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      globalThis.clearTimeout(timeout)
+      callback()
+    }
+    const timeout = globalThis.setTimeout(
+      () =>
+        finish(() => reject(new MenuVisualDeadlineError(timeoutMessage))),
+      Math.max(0, deadlineMs),
+    )
+    void task.then(
+      () => finish(resolve),
+      (error: unknown) => finish(() => reject(error)),
+    )
+  })
+}
+
+function createCanonicalMenuAlphaMask(): AlphaSilhouetteMask {
+  const resolution = MENU_ALPHA_MASK_RESOLUTION
+  const radiusScaled = resolution * CANONICAL_SHAPE_RADIUS_PERCENT
+  const alpha = new Uint8Array(resolution * resolution)
+
+  for (let row = 0; row < resolution; row += 1) {
+    const yScaled = (row * 2 + 1 - resolution) * 100
+    for (let column = 0; column < resolution; column += 1) {
+      const xScaled = (column * 2 + 1 - resolution) * 100
+      if (
+        xScaled * xScaled + yScaled * yScaled <=
+        radiusScaled * radiusScaled
+      ) {
+        alpha[row * resolution + column] = 255
+      }
+    }
+  }
+
+  return createAlphaSilhouetteMask(resolution, resolution, alpha)
+}
+
+class MenuVisualDeadlineError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'MenuVisualDeadlineError'
   }
 }

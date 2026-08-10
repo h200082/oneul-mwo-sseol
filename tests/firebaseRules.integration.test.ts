@@ -52,14 +52,14 @@ describeWithEmulator('Cloud Firestore security rules', () => {
         ),
       },
     })
-  })
+  }, 30_000)
 
   beforeEach(async () => {
     await testEnvironment.clearFirestore()
   })
 
   afterAll(async () => {
-    await testEnvironment.cleanup()
+    await testEnvironment?.cleanup()
   })
 
   it('requires authentication for exact room reads and blocks room listing', async () => {
@@ -157,7 +157,7 @@ describeWithEmulator('Cloud Firestore security rules', () => {
     )
   })
 
-  it('lets only the host start and locks the roster', async () => {
+  it('requires host prepare, self-ready acknowledgements, and all-ready finalize', async () => {
     await seedRoom(waitingRoom(['host-uid', 'member-uid']))
     const hostDb = testEnvironment
       .authenticatedContext('host-uid')
@@ -165,28 +165,30 @@ describeWithEmulator('Cloud Firestore security rules', () => {
     const memberDb = testEnvironment
       .authenticatedContext('member-uid')
       .firestore()
+    const outsiderDb = testEnvironment
+      .authenticatedContext('outsider-uid')
+      .firestore()
 
-    const startAt = Timestamp.now()
-    const resultDeadlineAt = Timestamp.fromMillis(
-      startAt.toMillis() + ROOM_RESULT_WINDOW_MS,
-    )
-    const startUpdate = {
-      status: 'started',
+    const prepareUpdate = {
+      schemaVersion: 3,
+      status: 'preparing',
       start: {
+        startId: 'round-1',
         deckSeed: 'shared-seed',
         contentVersion: 'menus-v1',
-        startAt,
-        resultDeadlineAt,
+        startAt: null,
+        resultDeadlineAt: null,
         rosterIds: ['host-uid', 'member-uid'],
+        readyPlayerIds: [],
       },
       updatedAt: serverTimestamp(),
     }
 
     await assertFails(
-      updateDoc(doc(memberDb, 'rooms', ROOM_CODE), startUpdate),
+      updateDoc(doc(memberDb, 'rooms', ROOM_CODE), prepareUpdate),
     )
     await assertSucceeds(
-      updateDoc(doc(hostDb, 'rooms', ROOM_CODE), startUpdate),
+      updateDoc(doc(hostDb, 'rooms', ROOM_CODE), prepareUpdate),
     )
     await assertFails(
       updateDoc(doc(memberDb, 'rooms', ROOM_CODE), {
@@ -198,6 +200,65 @@ describeWithEmulator('Cloud Firestore security rules', () => {
         },
         updatedAt: serverTimestamp(),
       }),
+    )
+
+    await assertSucceeds(
+      updateDoc(doc(hostDb, 'rooms', ROOM_CODE), {
+        'start.readyPlayerIds': ['host-uid'],
+        updatedAt: serverTimestamp(),
+      }),
+    )
+    await assertFails(
+      updateDoc(doc(outsiderDb, 'rooms', ROOM_CODE), {
+        'start.readyPlayerIds': ['host-uid', 'outsider-uid'],
+        updatedAt: serverTimestamp(),
+      }),
+    )
+    const earlyStartAt = Timestamp.fromMillis(Date.now() + 3_000)
+    await assertFails(
+      updateDoc(doc(hostDb, 'rooms', ROOM_CODE), {
+        status: 'started',
+        'start.startAt': earlyStartAt,
+        'start.resultDeadlineAt': Timestamp.fromMillis(
+          earlyStartAt.toMillis() + ROOM_RESULT_WINDOW_MS,
+        ),
+        updatedAt: serverTimestamp(),
+      }),
+    )
+    await assertFails(
+      updateDoc(doc(memberDb, 'rooms', ROOM_CODE), {
+        'start.startId': 'stale-round',
+        'start.readyPlayerIds': ['host-uid', 'member-uid'],
+        updatedAt: serverTimestamp(),
+      }),
+    )
+    await assertSucceeds(
+      updateDoc(doc(memberDb, 'rooms', ROOM_CODE), {
+        'start.readyPlayerIds': ['host-uid', 'member-uid'],
+        updatedAt: serverTimestamp(),
+      }),
+    )
+    await assertFails(
+      updateDoc(doc(memberDb, 'rooms', ROOM_CODE), {
+        'start.readyPlayerIds': ['host-uid', 'member-uid'],
+        updatedAt: serverTimestamp(),
+      }),
+    )
+
+    const startAt = Timestamp.fromMillis(Date.now() + 3_000)
+    const finalizeUpdate = {
+      status: 'started',
+      'start.startAt': startAt,
+      'start.resultDeadlineAt': Timestamp.fromMillis(
+        startAt.toMillis() + ROOM_RESULT_WINDOW_MS,
+      ),
+      updatedAt: serverTimestamp(),
+    }
+    await assertFails(
+      updateDoc(doc(memberDb, 'rooms', ROOM_CODE), finalizeUpdate),
+    )
+    await assertSucceeds(
+      updateDoc(doc(hostDb, 'rooms', ROOM_CODE), finalizeUpdate),
     )
   })
 
@@ -281,7 +342,7 @@ describeWithEmulator('Cloud Firestore security rules', () => {
     )
   })
 
-  it('accepts a legacy v1 start during the migration window', async () => {
+  it('rejects a legacy waiting-to-started shortcut', async () => {
     await seedRoom(
       waitingRoom(['host-uid', 'member-uid'], false, ROOM_CODE, 1),
     )
@@ -290,7 +351,7 @@ describeWithEmulator('Cloud Firestore security rules', () => {
       .firestore()
     const startAt = Timestamp.now()
 
-    await assertSucceeds(
+    await assertFails(
       updateDoc(doc(hostDb, 'rooms', ROOM_CODE), {
         status: 'started',
         start: {
@@ -312,7 +373,7 @@ describeWithEmulator('Cloud Firestore security rules', () => {
         1_000,
     )
     await seedRoom(
-      startedRoom(['host-uid', 'member-uid'], closedStartAt, 1),
+      startedRoom(['host-uid', 'member-uid'], closedStartAt, 3),
     )
     const hostDb = testEnvironment
       .authenticatedContext('host-uid')
@@ -476,13 +537,39 @@ describeWithEmulator('Cloud Firestore security rules', () => {
         'member-uid',
       ])
 
-      const started = await hostGateway.start(created.code, {
+      const prepared = await hostGateway.prepareStart(created.code, {
         requesterPlayerId: 'host-uid',
+        startId: 'gateway-round-1',
         deckSeed: 'shared-seed',
         contentVersion: 'menus-v1',
-        startAt: Date.now(),
+      })
+      expect(prepared.start.readyPlayerIds).toEqual([])
+      await hostGateway.acknowledgeReady(created.code, {
+        playerId: 'host-uid',
+        startId: prepared.start.startId,
+      })
+      const allReady = await memberGateway.acknowledgeReady(created.code, {
+        playerId: 'member-uid',
+        startId: prepared.start.startId,
+      })
+      expect(allReady.start.readyPlayerIds).toEqual([
+        'host-uid',
+        'member-uid',
+      ])
+      const started = await hostGateway.finalizeStart(created.code, {
+        requesterPlayerId: 'host-uid',
+        startId: prepared.start.startId,
+        startAt: Date.now() + 3_000,
       })
       expect(started.start.roster).toHaveLength(2)
+      await expect(
+        hostGateway.start(created.code, {
+          requesterPlayerId: 'host-uid',
+          deckSeed: started.start.deckSeed,
+          contentVersion: started.start.contentVersion,
+          startAt: started.start.startAt,
+        }),
+      ).resolves.toEqual(started)
 
       const observedResults: string[][] = []
       const listenerErrors: unknown[] = []
@@ -606,10 +693,23 @@ describeWithEmulator('Cloud Firestore security rules', () => {
         { timeout: 5_000 },
       )
 
-      const started = await hostGateway.start(created.code, {
+      const prepared = await hostGateway.prepareStart(created.code, {
         requesterPlayerId: 'late-host-uid',
+        startId: 'late-subscription-round',
         deckSeed: 'late-subscription-seed',
         contentVersion: 'menus-v1',
+      })
+      await hostGateway.acknowledgeReady(created.code, {
+        playerId: 'late-host-uid',
+        startId: prepared.start.startId,
+      })
+      await memberGateway.acknowledgeReady(created.code, {
+        playerId: 'late-member-uid',
+        startId: prepared.start.startId,
+      })
+      const started = await hostGateway.finalizeStart(created.code, {
+        requesterPlayerId: 'late-host-uid',
+        startId: prepared.start.startId,
         startAt: Date.now() + 3_000,
       })
       const expectedStarted =
@@ -660,7 +760,7 @@ function waitingRoom(
   memberIds: readonly string[],
   useServerTimestamps = false,
   code = ROOM_CODE,
-  schemaVersion: 1 | 2 = 2,
+  schemaVersion: 1 | 2 | 3 = 2,
 ): Record<string, unknown> {
   const timestamp = useServerTimestamps
     ? serverTimestamp()
@@ -688,16 +788,21 @@ function waitingRoom(
 function startedRoom(
   memberIds: readonly string[],
   startAt = Timestamp.now(),
-  schemaVersion: 1 | 2 = 2,
+  schemaVersion: 1 | 2 | 3 = 2,
 ): Record<string, unknown> {
   return {
     ...waitingRoom(memberIds, false, ROOM_CODE, schemaVersion),
     status: 'started',
     start: {
+      ...(schemaVersion === 3
+        ? {
+            startId: 'seeded-round',
+          }
+        : {}),
       deckSeed: 'shared-seed',
       contentVersion: 'menus-v1',
       startAt,
-      ...(schemaVersion === 2
+      ...(schemaVersion !== 1
         ? {
             resultDeadlineAt: Timestamp.fromMillis(
               startAt.toMillis() + ROOM_RESULT_WINDOW_MS,
@@ -705,6 +810,11 @@ function startedRoom(
           }
         : {}),
       rosterIds: [...memberIds],
+      ...(schemaVersion === 3
+        ? {
+            readyPlayerIds: [...memberIds],
+          }
+        : {}),
     },
   }
 }

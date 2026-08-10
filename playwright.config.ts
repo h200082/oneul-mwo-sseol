@@ -5,7 +5,7 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 2 : 0,
-  reporter: 'html',
+  reporter: process.env.FOOD_LIBRARY_QA === '1' ? 'line' : 'html',
   use: {
     baseURL: 'http://127.0.0.1:4173',
     trace: 'on-first-retry',

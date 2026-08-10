@@ -11,66 +11,89 @@ import {
   preloadMenuVisuals,
 } from '../src/data/menuVisuals'
 
-const ASSET_DESCRIPTORS = [
-  { filename: 'ramyeon-v2.webp', width: 512, height: 512 },
-  { filename: 'kimchi-jjigae.webp', width: 512, height: 512 },
-  { filename: 'sushi.webp', width: 512, height: 512 },
-  { filename: 'fried-chicken-v2.webp', width: 512, height: 512 },
-  { filename: 'pizza.webp', width: 512, height: 512 },
-  { filename: 'galbitang-v2.webp', width: 438, height: 512 },
-  { filename: 'omurice-v2.webp', width: 512, height: 332 },
-  { filename: 'gimbap-v2.webp', width: 512, height: 341 },
-  { filename: 'sandwich-v2.webp', width: 512, height: 330 },
-  { filename: 'tteokbokki-v2.webp', width: 394, height: 512 },
-  { filename: 'home-style-baekban-v2.webp', width: 512, height: 175 },
-] as const
-
 describe('MENU_VISUALS', () => {
-  it('maps eleven existing menus to unique Phaser textures', () => {
-    const catalogIds = new Set(MENU_CATALOG.map((menu) => menu.id))
+  it('maps every catalog menu to one unique Phaser texture and WebP', () => {
+    const catalogIds = MENU_CATALOG.map((menu) => menu.id)
+    const visualIds = MENU_VISUALS.map((visual) => visual.menuId)
 
-    expect(MENU_VISUALS).toHaveLength(11)
-    expect(new Set(MENU_VISUALS.map((visual) => visual.menuId)).size).toBe(11)
-    expect(new Set(MENU_VISUALS.map((visual) => visual.textureKey)).size).toBe(11)
+    expect(MENU_VISUALS).toHaveLength(50)
+    expect(new Set(visualIds)).toEqual(new Set(catalogIds))
+    expect(new Set(visualIds).size).toBe(MENU_VISUALS.length)
+    expect(new Set(MENU_VISUALS.map((visual) => visual.textureKey)).size).toBe(
+      MENU_VISUALS.length,
+    )
+    expect(
+      new Set(MENU_VISUALS.map((visual) => visual.assetFilename)).size,
+    ).toBe(MENU_VISUALS.length)
 
     for (const visual of MENU_VISUALS) {
-      expect(catalogIds.has(visual.menuId)).toBe(true)
       expect(visual.textureKey).toBe(`food:${visual.menuId}`)
       expect(visual.imageUrl).toMatch(/\.webp(?:\?.*)?$/)
+      expect(visual.assetFilename).toMatch(/\.webp$/)
       expect(getMenuVisual(visual.menuId)).toBe(visual)
     }
     expect(getMenuVisual('menu-without-art')).toBeUndefined()
   })
 
-  it('stores eleven aspect-preserving alpha WebPs inside the mobile loading budget', () => {
-    const assets = ASSET_DESCRIPTORS.map((descriptor) => {
+  it('applies bounded gameplay alignment only to the four measured outliers', () => {
+    const alignedVisuals = Object.fromEntries(
+      MENU_VISUALS.filter((visual) => visual.gameplayOffset).map((visual) => [
+        visual.menuId,
+        visual.gameplayOffset,
+      ]),
+    )
+
+    expect(alignedVisuals).toEqual({
+      gamjatang: { x: -7, y: -13 },
+      pasta: { x: -4, y: -25 },
+      bossam: { x: 15, y: -6 },
+      tteokbokki: { x: -5, y: -14 },
+    })
+    for (const offset of Object.values(alignedVisuals)) {
+      expect(Number.isFinite(offset?.x)).toBe(true)
+      expect(Number.isFinite(offset?.y)).toBe(true)
+      expect(Math.abs(offset?.x ?? 0)).toBeLessThanOrEqual(32)
+      expect(Math.abs(offset?.y ?? 0)).toBeLessThanOrEqual(32)
+    }
+  })
+
+  it('stores fifty aspect-preserving alpha WebPs inside the mobile budget', () => {
+    const assets = MENU_VISUALS.map((visual) => {
       const fileUrl = new URL(
-        `../src/assets/food/${descriptor.filename}`,
+        `../src/assets/food/${visual.assetFilename}`,
         import.meta.url,
       )
-      return { descriptor, asset: readFileSync(fileURLToPath(fileUrl)) }
+      return { visual, asset: readFileSync(fileURLToPath(fileUrl)) }
     })
 
-    for (const { descriptor, asset } of assets) {
+    for (const { visual, asset } of assets) {
       expect(asset.length).toBeGreaterThan(1_000)
-      expect(asset.length).toBeLessThan(120_000)
+      expect(asset.length).toBeLessThanOrEqual(120_000)
       expect(asset.subarray(0, 4).toString('ascii')).toBe('RIFF')
       expect(asset.subarray(8, 12).toString('ascii')).toBe('WEBP')
       expect(asset.subarray(12, 16).toString('ascii')).toBe('VP8X')
       expect(asset[20]! & 0x10).toBe(0x10)
       expect(asset.includes(Buffer.from('ALPH'))).toBe(true)
-      expect(readUint24Le(asset, 24) + 1).toBe(descriptor.width)
-      expect(readUint24Le(asset, 27) + 1).toBe(descriptor.height)
-      expect(Math.max(descriptor.width, descriptor.height)).toBe(512)
+
+      const width = readUint24Le(asset, 24) + 1
+      const height = readUint24Le(asset, 27) + 1
+      expect(width).toBe(visual.sourceWidth)
+      expect(height).toBe(visual.sourceHeight)
+      expect(Math.max(width, height)).toBe(512)
     }
 
-    for (const descriptor of ASSET_DESCRIPTORS.slice(5)) {
-      expect(descriptor.width).not.toBe(descriptor.height)
-    }
-
+    const sizes = assets.map(({ asset }) => asset.length).sort((a, b) => b - a)
+    expect(sizes.reduce((total, size) => total + size, 0)).toBeLessThanOrEqual(
+      3_500_000,
+    )
+    expect(sizes.slice(0, 20).reduce((total, size) => total + size, 0)).toBeLessThanOrEqual(
+      1_500_000,
+    )
     expect(
-      assets.reduce((total, { asset }) => total + asset.length, 0),
-    ).toBeLessThan(750_000)
+      MENU_VISUALS.filter(
+        (visual) => visual.sourceWidth !== visual.sourceHeight,
+      ).length,
+    ).toBeGreaterThanOrEqual(40)
   })
 
   it('does not require the browser Image API in the unit-test runtime', async () => {

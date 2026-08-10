@@ -1,11 +1,17 @@
 import QRCode from 'qrcode'
 
+import chefCatImageUrl from '../assets/title/chef-cat-v1.webp'
+import gimbapImageUrl from '../assets/title/title-food-gimbap.webp'
+import pizzaImageUrl from '../assets/title/title-food-pizza.webp'
+import ramyeonImageUrl from '../assets/title/title-food-ramyeon.webp'
+import tteokbokkiImageUrl from '../assets/title/title-food-tteokbokki.webp'
 import {
   ROOM_RESULT_SYNC_GRACE_MS,
   ROOM_RESULT_WINDOW_MS,
   canStartRoom,
   normalizeNickname,
   type MealTime,
+  type PreparingRoom,
   type Room,
   type StartedRoom,
   type WaitingRoom,
@@ -16,6 +22,7 @@ import {
   resolveRoomResults,
   type FinalRoomResultsSummary,
 } from '../domain/roomResultResolution'
+import { resolveRoomMenuCandidates } from '../domain/roomMenuCandidates'
 import { MENU_CATALOG, type MenuItem } from '../data/menus'
 import { getMenuVisual } from '../data/menuVisuals'
 import {
@@ -23,6 +30,12 @@ import {
   type SensoryFeedback,
   type SensoryFeedbackDebugState,
 } from '../feedback/SensoryFeedback'
+import {
+  createBrowserNarrationPreference,
+  type NarrationPreference,
+  type NarrationPreferenceListener,
+  type NarrationPreferenceState,
+} from '../feedback/narrationPreference'
 import type {
   GameLaunchOptions,
   PlayerGameResult,
@@ -32,6 +45,7 @@ import {
   RoomGameProgressStore,
   type RoomGameProgressIdentity,
 } from '../game/gameProgress'
+import { PersonalBestStore } from '../game/personalBestStore'
 import {
   QrScannerError,
   scanRoomCodeFromCamera,
@@ -40,6 +54,7 @@ import { LocalRoomGateway } from '../rooms/LocalRoomGateway'
 import type {
   AuthoritativeRoomResultState,
   RoomGateway,
+  RoomSnapshotMetadata,
 } from '../rooms/RoomGateway'
 import {
   buildRoomInviteUrl,
@@ -50,14 +65,28 @@ import { GameHost } from './GameHost'
 
 const PLAYER_ID_STORAGE_KEY = 'oneul-mwo-sseol-player-id'
 const NICKNAME_STORAGE_KEY = 'oneul-mwo-sseol-nickname'
-const CONTENT_VERSION = 'menus-v1'
-const ROOM_COUNTDOWN_MS = 3_000
+const SPLASH_ENTERED_STORAGE_KEY = 'oneul-mwo-sseol-splash-entered'
+const SPLASH_TRANSITION_MS = 380
+const CONTENT_VERSION = 'menus-v2'
+const ROOM_COUNTDOWN_MS = 4_000
 const ROOM_COUNTDOWN_SOUND_SCALE = 0.8
 const ROOM_EVENT_SOUND_SCALE = 0.86
 const RESULT_COUNTDOWN_REFRESH_MS = 1_000
 const RESULT_FINALIZATION_RETRY_MS = 2_000
 const ROOM_SYNC_WATCHDOG_MS = 5_000
+const ROOM_SYNC_RECONCILIATION_INTERVAL_MS = 2_000
+const ROOM_SYNC_SINGLE_PLAYER_RECONCILIATION_INTERVAL_MS = 5_000
+const ROOM_SYNC_DEGRADED_RECONCILIATION_INTERVAL_MS = 10_000
+const ROOM_SYNC_SERVER_READ_TIMEOUT_MS = 4_000
 const ROOM_SYNC_RETRY_DELAYS_MS = [500, 1_500, 3_000] as const
+const NARRATION_ICON_MARKUP = `
+  <span class="feedback-icon feedback-icon-narration" aria-hidden="true">
+    <svg viewBox="0 0 24 24" focusable="false">
+      <path d="M6 5h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-7l-5 3v-3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" />
+      <path d="M8 9h8M8 12h5" />
+    </svg>
+  </span>
+`
 
 const MENU_BY_ID = new Map(MENU_CATALOG.map((menu) => [menu.id, menu]))
 
@@ -73,6 +102,7 @@ export interface AppControllerOptions {
   readonly playerId?: string
   readonly backend?: AppBackend
   readonly sensoryFeedback?: SensoryFeedback
+  readonly narrationPreference?: NarrationPreference
 }
 
 export interface AppDebugRoomResultInput {
@@ -88,6 +118,14 @@ export type RoomSyncPhase =
   | 'recovering'
   | 'failed'
 
+type LobbyRefreshReason =
+  | 'retry'
+  | 'manual'
+  | 'visible'
+  | 'online'
+  | 'cache'
+  | 'reconcile'
+
 export interface AppDebugRoomSyncState {
   readonly phase: RoomSyncPhase
   readonly lastSyncedAt: number | null
@@ -102,6 +140,7 @@ export interface AppDebugState {
   readonly room: Room | null
   readonly roomSync: Readonly<AppDebugRoomSyncState>
   readonly sensoryFeedback: Readonly<SensoryFeedbackDebugState>
+  readonly narrationPreference: Readonly<NarrationPreferenceState>
   readonly gameVisible: boolean
   readonly startSoloGameForTest: (
     deckSeed: GameLaunchOptions['deckSeed'],
@@ -131,7 +170,9 @@ export class AppController {
   private readonly playerId: string
   private readonly backend: AppBackend
   private readonly gameProgressStore: RoomGameProgressStore
+  private readonly personalBestStore: PersonalBestStore
   private readonly sensoryFeedback: SensoryFeedback
+  private readonly narrationPreference: NarrationPreference
   private unsubscribeRoom: (() => void) | null = null
   private unsubscribeResults: (() => void) | null = null
   private countdownInterval: number | null = null
@@ -141,18 +182,31 @@ export class AppController {
   private currentRoom: Room | null = null
   private scheduledRoomKey: string | null = null
   private roomStartPending = false
+  private roomPreparationKey: string | null = null
+  private roomPreparationTask: Promise<void> | null = null
+  private roomReadyAckKey: string | null = null
+  private roomReadyAckPending = false
+  private roomFinalizeKey: string | null = null
+  private roomFinalizePending = false
   private roomSyncPhase: RoomSyncPhase = 'idle'
   private roomSyncLastEventAt: number | null = null
   private roomSyncRetryCount = 0
   private roomSyncErrorCode: string | null = null
   private roomSyncConnectionToken = 0
+  private roomSyncServerConnectionToken: number | null = null
+  private roomSyncNeedsReconnect = false
   private roomSyncWatchdogTimeout: number | null = null
   private roomSyncRetryTimeout: number | null = null
+  private roomSyncReconciliationTimeout: number | null = null
   private roomSyncRefreshTask: Promise<void> | null = null
   private lobbyVisibilityHandler: (() => void) | null = null
   private lobbyOnlineHandler: (() => void) | null = null
+  private lobbyFocusHandler: (() => void) | null = null
+  private lobbyPageShowHandler: (() => void) | null = null
   private scannerAbortController: AbortController | null = null
   private viewGeneration = 0
+  private splashTransitionTimeout: number | null = null
+  private splashEnteredInMemory = false
   private homeActionPending = false
   private activeHomeAction: symbol | null = null
   private activeRoomResultFlow: ActiveRoomResultFlow | null = null
@@ -209,8 +263,12 @@ export class AppController {
       options.backend ??
       (roomGateway instanceof LocalRoomGateway ? 'local' : 'firebase')
     this.gameProgressStore = new RoomGameProgressStore(window.localStorage)
+    this.personalBestStore = new PersonalBestStore(window.localStorage)
     this.sensoryFeedback =
       options.sensoryFeedback ?? createBrowserSensoryFeedback()
+    this.narrationPreference =
+      options.narrationPreference ??
+      createBrowserNarrationPreference(() => this.sensoryFeedback.soundEnabled)
     this.appRoot.addEventListener(
       'pointerdown',
       this.sensoryPointerDownHandler,
@@ -234,21 +292,30 @@ export class AppController {
     this.gameHost = new GameHost(this.gameRoot, () => {
       this.returnHome()
     }, (result) => {
-      if (result.mode === 'room') {
-        queueMicrotask(() => {
-          void this.handleGameResult(result)
-        })
-      }
-    }, this.gameProgressStore, this.sensoryFeedback)
+      queueMicrotask(() => {
+        void this.handleGameResult(result)
+      })
+    }, this.gameProgressStore, this.sensoryFeedback, this.narrationPreference)
   }
 
   start(): void {
     const invitedRoomCode = readRoomCodeFromUrl(window.location.href)
-    this.renderHome(invitedRoomCode)
+    if (invitedRoomCode) {
+      this.renderHome(invitedRoomCode)
+      return
+    }
+
+    if (this.hasEnteredSplashThisSession()) {
+      this.renderHome()
+      return
+    }
+
+    this.renderSplash()
   }
 
   destroy(): void {
     this.viewGeneration += 1
+    this.clearSplashTransition()
     this.activeHomeAction = null
     this.homeActionPending = false
     this.cleanupRoomFlow()
@@ -278,6 +345,157 @@ export class AppController {
     this.screenRoot.remove()
   }
 
+  private hasEnteredSplashThisSession(): boolean {
+    if (this.splashEnteredInMemory) {
+      return true
+    }
+
+    try {
+      const hasEntered =
+        window.sessionStorage.getItem(SPLASH_ENTERED_STORAGE_KEY) === '1'
+      if (hasEntered) {
+        this.splashEnteredInMemory = true
+      }
+      return hasEntered
+    } catch {
+      return false
+    }
+  }
+
+  private markSplashEntered(): void {
+    this.splashEnteredInMemory = true
+    try {
+      window.sessionStorage.setItem(SPLASH_ENTERED_STORAGE_KEY, '1')
+    } catch {
+      // A privacy-restricted browser can still keep the state in memory.
+    }
+  }
+
+  private clearSplashTransition(): void {
+    if (this.splashTransitionTimeout === null) {
+      return
+    }
+
+    window.clearTimeout(this.splashTransitionTimeout)
+    this.splashTransitionTimeout = null
+  }
+
+  private renderSplash(): void {
+    const splashGeneration = ++this.viewGeneration
+    this.clearSplashTransition()
+    this.cleanupRoomFlow()
+    this.gameHost.stop()
+    this.homeActionPending = false
+    this.activeHomeAction = null
+    this.screenRoot.hidden = false
+    this.screenRoot.innerHTML = `
+      <div class="app-screen splash-screen" data-testid="splash-screen">
+        <div class="splash-backdrop" aria-hidden="true">
+          <span class="splash-glow splash-glow-coral"></span>
+          <span class="splash-glow splash-glow-mint"></span>
+          <span class="splash-speed-line splash-speed-line-one"></span>
+          <span class="splash-speed-line splash-speed-line-two"></span>
+          <span class="splash-speed-line splash-speed-line-three"></span>
+        </div>
+
+        <header class="splash-heading">
+          <p class="eyebrow">POP ARCADE MENU BATTLE</p>
+          <h1>오늘 뭐 <strong>썰?</strong></h1>
+          <p>베고, 고르고, 오늘 메뉴 결정!</p>
+        </header>
+
+        <div
+          class="splash-motion-stage"
+          data-testid="splash-motion-stage"
+          aria-hidden="true"
+        >
+          <img
+            class="splash-food splash-food-ramyeon"
+            data-testid="splash-food"
+            src="${ramyeonImageUrl}"
+            alt=""
+          />
+          <img
+            class="splash-food splash-food-gimbap"
+            data-testid="splash-food"
+            src="${gimbapImageUrl}"
+            alt=""
+          />
+          <img
+            class="splash-food splash-food-tteokbokki"
+            data-testid="splash-food"
+            src="${tteokbokkiImageUrl}"
+            alt=""
+          />
+          <img
+            class="splash-food splash-food-pizza"
+            data-testid="splash-food"
+            src="${pizzaImageUrl}"
+            alt=""
+          />
+          <span class="splash-slash splash-slash-primary"></span>
+          <span class="splash-slash splash-slash-secondary"></span>
+          <span class="splash-score-burst">PERFECT!</span>
+          <img
+            class="splash-chef-cat"
+            data-testid="splash-chef-cat"
+            src="${chefCatImageUrl}"
+            alt=""
+          />
+        </div>
+
+        <div class="splash-action">
+          <button
+            class="button button-accent splash-start-button"
+            type="button"
+            data-testid="splash-start"
+          >게임 시작</button>
+          <p>친구들과 메뉴를 썰고 오늘의 식사를 골라보세요.</p>
+        </div>
+      </div>
+    `
+
+    const splash = this.query<HTMLElement>(
+      '[data-testid="splash-screen"]',
+    )
+    const startButton = this.query<HTMLButtonElement>(
+      '[data-testid="splash-start"]',
+    )
+    startButton.addEventListener('click', () => {
+      if (
+        splashGeneration !== this.viewGeneration ||
+        startButton.disabled
+      ) {
+        return
+      }
+
+      startButton.disabled = true
+      this.markSplashEntered()
+      splash.classList.add('is-leaving')
+      splash.setAttribute('aria-busy', 'true')
+
+      void this.sensoryFeedback.unlock().then((unlocked) => {
+        if (unlocked && splashGeneration === this.viewGeneration) {
+          this.sensoryFeedback.trigger('ui-confirm')
+        }
+      })
+
+      const reduceMotion = window.matchMedia?.(
+        '(prefers-reduced-motion: reduce)',
+      ).matches
+      this.splashTransitionTimeout = window.setTimeout(
+        () => {
+          this.splashTransitionTimeout = null
+          if (splashGeneration !== this.viewGeneration) {
+            return
+          }
+          this.renderHome()
+        },
+        reduceMotion ? 0 : SPLASH_TRANSITION_MS,
+      )
+    })
+  }
+
   getDebugState(): AppDebugState {
     return {
       playerId: this.playerId,
@@ -291,12 +509,13 @@ export class AppController {
         errorCode: this.roomSyncErrorCode,
       }),
       sensoryFeedback: this.sensoryFeedback.getDebugState(),
+      narrationPreference: this.narrationPreference.getState(),
       gameVisible: !this.gameRoot.hidden,
       startSoloGameForTest: (deckSeed) => {
         if (!import.meta.env.DEV) {
           throw new Error('솔로 게임 테스트 훅은 개발 모드에서만 사용할 수 있습니다.')
         }
-        this.startGame({
+        void this.prepareAndStartGame({
           mode: 'solo',
           mealTime: 'lunch',
           deckSeed,
@@ -324,16 +543,35 @@ export class AppController {
     }
   }
 
+  getNarrationPreferenceState(): Readonly<NarrationPreferenceState> {
+    return this.narrationPreference.getState()
+  }
+
+  setNarrationEnabled(enabled: boolean): void {
+    this.narrationPreference.setEnabled(enabled)
+    this.updateHomeFeedbackControls()
+  }
+
+  subscribeNarrationPreference(
+    listener: NarrationPreferenceListener,
+  ): () => void {
+    return this.narrationPreference.subscribe(listener)
+  }
+
   private updateHomeFeedbackControls(): void {
     const soundToggle =
       this.screenRoot.querySelector<HTMLButtonElement>(
         '[data-testid="sound-toggle"]',
       )
+    const narrationToggle =
+      this.screenRoot.querySelector<HTMLButtonElement>(
+        '[data-testid="narration-toggle"]',
+      )
     const hapticsToggle =
       this.screenRoot.querySelector<HTMLButtonElement>(
         '[data-testid="haptics-toggle"]',
       )
-    if (!soundToggle || !hapticsToggle) {
+    if (!soundToggle || !narrationToggle || !hapticsToggle) {
       return
     }
 
@@ -345,10 +583,25 @@ export class AppController {
       'aria-label',
       `효과음 ${this.sensoryFeedback.soundEnabled ? '끄기' : '켜기'}`,
     )
-    soundToggle.innerHTML =
-      '<span aria-hidden="true">♪</span><span>효과음 ' +
-      (this.sensoryFeedback.soundEnabled ? 'ON' : 'OFF') +
-      '</span>'
+    soundToggle.innerHTML = '<span aria-hidden="true">♪</span>'
+
+    const narrationState = this.narrationPreference.getState()
+    narrationToggle.setAttribute(
+      'aria-pressed',
+      String(narrationState.requestedEnabled),
+    )
+    narrationToggle.setAttribute(
+      'aria-label',
+      `나레이션 ${narrationState.requestedEnabled ? '끄기' : '켜기'}`,
+    )
+    narrationToggle.dataset.effective = String(
+      narrationState.effectiveEnabled,
+    )
+    narrationToggle.title =
+      narrationState.requestedEnabled && !narrationState.effectiveEnabled
+        ? '효과음을 켜면 나레이션이 재생돼요'
+        : ''
+    narrationToggle.innerHTML = NARRATION_ICON_MARKUP
 
     const hapticsAvailable = this.sensoryFeedback.hapticsSupported
     hapticsToggle.disabled = !hapticsAvailable
@@ -364,17 +617,13 @@ export class AppController {
         ? `진동 ${this.sensoryFeedback.hapticsEnabled ? '끄기' : '켜기'}`
         : '이 기기에서는 진동을 지원하지 않아요',
     )
-    hapticsToggle.innerHTML =
-      '<span aria-hidden="true">≋</span><span>' +
-      (hapticsAvailable
-        ? '진동 ' + (this.sensoryFeedback.hapticsEnabled ? 'ON' : 'OFF')
-        : '진동 미지원') +
-      '</span>'
+    hapticsToggle.innerHTML = '<span aria-hidden="true">≋</span>'
   }
 
   private renderHome(invitedRoomCode: string | null = null): void {
     const isInviteMode = invitedRoomCode !== null
     const homeGeneration = ++this.viewGeneration
+    this.clearSplashTransition()
     this.cleanupRoomFlow()
     this.gameHost.stop()
     this.homeActionPending = false
@@ -383,9 +632,12 @@ export class AppController {
     this.screenRoot.innerHTML = `
       <div
         class="app-screen home-screen${isInviteMode ? ' home-screen-invite' : ''}"
-        ${isInviteMode ? 'data-testid="invite-home"' : ''}
+        data-testid="home-screen"
       >
-        <header class="brand-block">
+        <header
+          class="brand-block"
+          ${isInviteMode ? 'data-testid="invite-home"' : ''}
+        >
           <p class="eyebrow">POP ARCADE MENU BATTLE</p>
           <h1>오늘 뭐 썰?</h1>
           <p class="brand-copy">
@@ -394,6 +646,7 @@ export class AppController {
           </p>
           <div
             class="feedback-settings"
+            data-testid="feedback-settings"
             role="group"
             aria-label="게임 피드백 설정"
           >
@@ -405,7 +658,22 @@ export class AppController {
               aria-label="효과음 ${this.sensoryFeedback.soundEnabled ? '끄기' : '켜기'}"
             >
               <span aria-hidden="true">♪</span>
-              <span>효과음 ${this.sensoryFeedback.soundEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+            <button
+              class="feedback-toggle feedback-toggle-narration"
+              type="button"
+              data-testid="narration-toggle"
+              aria-pressed="${this.narrationPreference.requestedEnabled ? 'true' : 'false'}"
+              aria-label="나레이션 ${this.narrationPreference.requestedEnabled ? '끄기' : '켜기'}"
+              data-effective="${this.narrationPreference.effectiveEnabled ? 'true' : 'false'}"
+              title="${
+                this.narrationPreference.requestedEnabled &&
+                !this.narrationPreference.effectiveEnabled
+                  ? '효과음을 켜면 나레이션이 재생돼요'
+                  : ''
+              }"
+            >
+              ${NARRATION_ICON_MARKUP}
             </button>
             <button
               class="feedback-toggle"
@@ -425,11 +693,6 @@ export class AppController {
               ${this.sensoryFeedback.hapticsSupported ? '' : 'disabled'}
             >
               <span aria-hidden="true">≋</span>
-              <span>${
-                this.sensoryFeedback.hapticsSupported
-                  ? `진동 ${this.sensoryFeedback.hapticsEnabled ? 'ON' : 'OFF'}`
-                  : '진동 미지원'
-              }</span>
             </button>
           </div>
         </header>
@@ -477,6 +740,13 @@ export class AppController {
             >
               방 만들기
             </button>
+            <button
+              class="button button-ghost tutorial-start"
+              type="button"
+              data-testid="tutorial-start"
+            >
+              튜토리얼 하기
+            </button>
           </div>
         </section>
 
@@ -494,13 +764,26 @@ export class AppController {
                     <li>놓친 음식은 0점으로 계산돼요.</li>
                     <li>포획한 음식은 평균 점수에서 제외돼요.</li>
                   </ul>
+                  <p
+                    class="ai-voice-disclosure"
+                    data-testid="ai-voice-disclosure"
+                  >이 게임의 일부 음식 나레이션은 Microsoft Azure AI Speech로 생성한 AI 합성 음성입니다. 실제 인물의 녹음이나 성대모사가 아닙니다.</p>
                 </div>
               </details>
             `
         }
 
-        <section class="join-card" aria-labelledby="join-title">
-          <div>
+        <details
+          class="join-card friend-join"
+          data-testid="friend-join"
+          ${isInviteMode ? 'open' : ''}
+        >
+          <summary>${isInviteMode ? '초대받은 방 참가' : '친구 방 참가'}</summary>
+          <div
+            class="friend-join-content"
+            data-testid="friend-join-content"
+          >
+            <div>
             <p class="section-kicker">
               ${isInviteMode ? 'ROOM INVITATION' : '친구 방 참가'}
             </p>
@@ -544,8 +827,9 @@ export class AppController {
                 >다른 방 찾기</button>
               `
               : ''
-          }
-        </section>
+            }
+          </div>
+        </details>
 
         <p class="prototype-note" data-testid="backend-note">
           ${
@@ -580,6 +864,11 @@ export class AppController {
       },
     )
     this.query<HTMLButtonElement>(
+      '[data-testid="narration-toggle"]',
+    ).addEventListener('click', () => {
+      this.setNarrationEnabled(!this.narrationPreference.requestedEnabled)
+    })
+    this.query<HTMLButtonElement>(
       '[data-testid="haptics-toggle"]',
     ).addEventListener('click', () => {
       this.sensoryFeedback.setHapticsEnabled(
@@ -591,17 +880,15 @@ export class AppController {
     this.query<HTMLButtonElement>('[data-testid="solo-start"]').addEventListener(
       'click',
       () => {
-        if (this.homeActionPending) {
-          return
-        }
-        const mealTime = this.readMealTime()
-        this.startGame({
-          mode: 'solo',
-          mealTime,
-          deckSeed: createDeckSeed('solo'),
-        })
+        void this.startSoloGame(elements)
       },
     )
+
+    this.query<HTMLButtonElement>(
+      '[data-testid="tutorial-start"]',
+    ).addEventListener('click', () => {
+      void this.startTutorial(elements)
+    })
 
     this.query<HTMLButtonElement>('[data-testid="create-room"]').addEventListener(
       'click',
@@ -639,6 +926,7 @@ export class AppController {
         const url = new URL(window.location.href)
         url.searchParams.delete('room')
         window.history.replaceState({}, '', url)
+        this.markSplashEntered()
         this.renderHome()
       })
 
@@ -727,6 +1015,50 @@ export class AppController {
     }
   }
 
+  private async startSoloGame(elements: HomeElements): Promise<void> {
+    if (this.homeActionPending) {
+      return
+    }
+
+    const action = Symbol('solo-game')
+    const generation = this.viewGeneration
+    const mealTime = this.readMealTime()
+    const previousPersonalBest = this.personalBestStore.read({
+      mode: 'solo',
+      mealTime,
+      contentVersion: CONTENT_VERSION,
+    })
+    const options: GameLaunchOptions = {
+      mode: 'solo',
+      mealTime,
+      deckSeed: createDeckSeed('solo'),
+      ...(previousPersonalBest
+        ? { previousPersonalBestScore: previousPersonalBest.score }
+        : {}),
+    }
+    this.homeActionPending = true
+    this.activeHomeAction = action
+    this.setHomeActionsDisabled(true)
+    elements.status.textContent = '이번 판의 메뉴를 준비하고 있어요…'
+
+    try {
+      await this.prepareAndStartGame(
+        options,
+        () => this.isCurrentHomeAction(action, generation),
+      )
+    } catch (error) {
+      if (this.activeHomeAction === action) {
+        elements.status.textContent = toUserMessage(error)
+      }
+    } finally {
+      if (this.activeHomeAction === action) {
+        this.activeHomeAction = null
+        this.homeActionPending = false
+        this.setHomeActionsDisabled(false)
+      }
+    }
+  }
+
   private async createRoom(elements: HomeElements): Promise<void> {
     if (this.homeActionPending) {
       return
@@ -793,6 +1125,11 @@ export class AppController {
         await this.resumeStartedRoom(existingRoom, resultState)
         return
       }
+      if (existingRoom?.status === 'preparing') {
+        this.assertCanResumePreparingRoom(existingRoom)
+        await this.renderLobby(existingRoom)
+        return
+      }
 
       elements.status.textContent = '방에 참가하고 있어요…'
       let room: WaitingRoom
@@ -804,6 +1141,11 @@ export class AppController {
       } catch (joinError) {
         const latestRoom = await this.roomGateway.get(roomCode)
         if (!this.isCurrentHomeAction(action, generation)) {
+          return
+        }
+        if (latestRoom?.status === 'preparing') {
+          this.assertCanResumePreparingRoom(latestRoom)
+          await this.renderLobby(latestRoom)
           return
         }
         if (latestRoom?.status !== 'started') {
@@ -837,7 +1179,9 @@ export class AppController {
     }
   }
 
-  private async renderLobby(initialRoom: WaitingRoom): Promise<void> {
+  private async renderLobby(
+    initialRoom: WaitingRoom | PreparingRoom,
+  ): Promise<void> {
     this.assertLobbyRoomIdentity(initialRoom, initialRoom.code)
     this.cleanupRoomFlow()
     const generation = ++this.viewGeneration
@@ -1052,6 +1396,14 @@ export class AppController {
             'SYNC-002',
           )
         },
+        (metadata) => {
+          this.handleLobbySnapshotMetadata(
+            metadata,
+            roomCode,
+            generation,
+            connectionToken,
+          )
+        },
       )
       if (
         !this.isActiveLobby(roomCode, generation) ||
@@ -1069,6 +1421,33 @@ export class AppController {
         'SYNC-002',
       )
     }
+  }
+
+  private handleLobbySnapshotMetadata(
+    metadata: Readonly<RoomSnapshotMetadata>,
+    roomCode: string,
+    generation: number,
+    connectionToken: number,
+  ): void {
+    if (
+      !this.isActiveLobby(roomCode, generation) ||
+      connectionToken !== this.roomSyncConnectionToken ||
+      metadata.hasPendingWrites ||
+      !metadata.fromCache
+    ) {
+      return
+    }
+
+    this.logRoomSync('cache-snapshot-observed', roomCode)
+    if (this.roomSyncServerConnectionToken !== connectionToken) {
+      return
+    }
+
+    this.roomSyncNeedsReconnect = true
+    this.roomSyncPhase = 'recovering'
+    this.roomSyncErrorCode = 'SYNC-007'
+    this.renderLobbySyncUi()
+    this.requestLobbyRefresh(roomCode, generation, 'cache')
   }
 
   private handleLobbySnapshot(
@@ -1101,6 +1480,8 @@ export class AppController {
 
     this.clearRoomSyncWatchdog()
     this.clearRoomSyncRetryTimeout()
+    this.roomSyncServerConnectionToken = connectionToken
+    this.roomSyncNeedsReconnect = false
     this.roomSyncPhase = 'live'
     this.roomSyncLastEventAt = Date.now()
     this.roomSyncRetryCount = 0
@@ -1150,6 +1531,7 @@ export class AppController {
       return
     }
 
+    this.clearLobbyReconciliation()
     this.dropRoomSubscription()
     this.clearRoomSyncRetryTimeout()
     if (this.roomSyncRetryCount >= ROOM_SYNC_RETRY_DELAYS_MS.length) {
@@ -1157,6 +1539,13 @@ export class AppController {
       this.roomSyncErrorCode = errorCode
       this.renderLobbySyncUi()
       this.logRoomSync('recovery-exhausted', roomCode)
+      const room = this.currentRoom
+      if (room && room.status !== 'started') {
+        this.scheduleLobbyReconciliation(
+          room,
+          ROOM_SYNC_DEGRADED_RECONCILIATION_INTERVAL_MS,
+        )
+      }
       return
     }
 
@@ -1175,7 +1564,7 @@ export class AppController {
   private requestLobbyRefresh(
     roomCode: string,
     generation: number,
-    reason: 'retry' | 'manual' | 'visible' | 'online',
+    reason: LobbyRefreshReason,
   ): void {
     if (
       !this.isActiveLobby(roomCode, generation) ||
@@ -1196,21 +1585,25 @@ export class AppController {
   private async performLobbyRefresh(
     roomCode: string,
     generation: number,
-    reason: 'retry' | 'manual' | 'visible' | 'online',
+    reason: LobbyRefreshReason,
   ): Promise<void> {
     if (!this.isActiveLobby(roomCode, generation)) {
       return
     }
 
-    this.dropRoomSubscription()
+    this.clearLobbyReconciliation()
     this.clearRoomSyncRetryTimeout()
-    this.roomSyncPhase = 'connecting'
-    this.roomSyncErrorCode = null
-    this.renderLobbySyncUi()
-    this.logRoomSync(`refresh-${reason}`, roomCode)
+    if (reason !== 'reconcile' && reason !== 'cache') {
+      this.roomSyncPhase = 'connecting'
+      this.roomSyncErrorCode = null
+      this.renderLobbySyncUi()
+    }
+    if (reason !== 'reconcile') {
+      this.logRoomSync(`refresh-${reason}`, roomCode)
+    }
 
     try {
-      const room = await this.roomGateway.get(roomCode)
+      const room = await this.readLobbyRoomWithDeadline(roomCode)
       if (!this.isActiveLobby(roomCode, generation)) {
         return
       }
@@ -1221,22 +1614,130 @@ export class AppController {
       this.assertLobbyRoomIdentity(room, roomCode)
       if (!this.shouldAcceptRoomSnapshot(room)) {
         this.logRoomSync('stale-refresh-ignored', roomCode, room)
+        const currentRoom = this.currentRoom
+        if (currentRoom && currentRoom.status !== 'started') {
+          this.scheduleLobbyReconciliation(currentRoom)
+        }
         return
       }
 
+      this.clearRoomSyncRetryTimeout()
       this.roomSyncPhase = 'live'
       this.roomSyncLastEventAt = Date.now()
+      this.roomSyncRetryCount = 0
       this.roomSyncErrorCode = null
-      this.logRoomSync('refresh-accepted', roomCode, room)
+      if (reason !== 'reconcile' || room.status === 'started') {
+        this.logRoomSync('refresh-accepted', roomCode, room)
+      }
       this.updateLobby(room)
-      if (room.status === 'waiting') {
+      if (
+        room.status !== 'started' &&
+        (reason !== 'reconcile' ||
+          this.roomSyncNeedsReconnect ||
+          this.unsubscribeRoom === null ||
+          this.roomSyncServerConnectionToken === null)
+      ) {
         void this.startLobbySubscription(roomCode, generation, true)
       }
     } catch {
       if (this.isActiveLobby(roomCode, generation)) {
-        this.scheduleLobbyRecovery(roomCode, generation, 'SYNC-005')
+        if (reason === 'reconcile' || reason === 'cache') {
+          this.handleLobbyReconciliationFailure(
+            roomCode,
+            generation,
+            reason,
+          )
+        } else {
+          this.scheduleLobbyRecovery(roomCode, generation, 'SYNC-005')
+        }
       }
     }
+  }
+
+  private handleLobbyReconciliationFailure(
+    roomCode: string,
+    generation: number,
+    reason: 'reconcile' | 'cache',
+  ): void {
+    if (!this.isActiveLobby(roomCode, generation)) {
+      return
+    }
+
+    if (reason === 'cache') {
+      this.roomSyncNeedsReconnect = true
+    }
+    this.roomSyncRetryCount = Math.min(
+      this.roomSyncRetryCount + 1,
+      ROOM_SYNC_RETRY_DELAYS_MS.length,
+    )
+    const exhausted =
+      this.roomSyncRetryCount >= ROOM_SYNC_RETRY_DELAYS_MS.length
+    this.roomSyncPhase = exhausted ? 'failed' : 'recovering'
+    this.roomSyncErrorCode = 'SYNC-005'
+    this.renderLobbySyncUi()
+    this.logRoomSync('reconciliation-failed', roomCode)
+
+    const room = this.currentRoom
+    if (!room || room.status === 'started') {
+      return
+    }
+    const delay = exhausted
+      ? ROOM_SYNC_DEGRADED_RECONCILIATION_INTERVAL_MS
+      : ROOM_SYNC_RETRY_DELAYS_MS[this.roomSyncRetryCount - 1]!
+    this.scheduleLobbyReconciliation(room, delay)
+  }
+
+  private readLobbyRoomWithDeadline(roomCode: string): Promise<Room | null> {
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const timeout = window.setTimeout(() => {
+        if (settled) {
+          return
+        }
+        settled = true
+        reject(new Error('Room server read timed out.'))
+      }, ROOM_SYNC_SERVER_READ_TIMEOUT_MS)
+
+      void this.roomGateway.get(roomCode).then(
+        (room) => {
+          if (settled) {
+            return
+          }
+          settled = true
+          window.clearTimeout(timeout)
+          resolve(room)
+        },
+        (error: unknown) => {
+          if (settled) {
+            return
+          }
+          settled = true
+          window.clearTimeout(timeout)
+          reject(error)
+        },
+      )
+    })
+  }
+
+  private scheduleLobbyReconciliation(
+    room: WaitingRoom | PreparingRoom,
+    delay = room.status === 'waiting' && room.players.length < 2
+      ? ROOM_SYNC_SINGLE_PLAYER_RECONCILIATION_INTERVAL_MS
+      : ROOM_SYNC_RECONCILIATION_INTERVAL_MS,
+  ): void {
+    this.clearLobbyReconciliation()
+    const generation = this.viewGeneration
+    if (!this.isActiveLobby(room.code, generation)) {
+      return
+    }
+
+    this.roomSyncReconciliationTimeout = window.setTimeout(() => {
+      this.roomSyncReconciliationTimeout = null
+      if (!this.isActiveLobby(room.code, generation)) {
+        return
+      }
+      this.requestLobbyRefresh(room.code, generation, 'reconcile')
+    }, delay)
   }
 
   private setupLobbyRecoveryTriggers(
@@ -1244,14 +1745,17 @@ export class AppController {
     generation: number,
   ): void {
     this.cleanupLobbyRecoveryTriggers()
-    this.lobbyVisibilityHandler = () => {
-      if (document.visibilityState !== 'visible') {
-        return
-      }
+    const requestForegroundRefresh = (): void => {
       if (this.roomSyncPhase === 'failed') {
         this.roomSyncRetryCount = 0
       }
       this.requestLobbyRefresh(roomCode, generation, 'visible')
+    }
+    this.lobbyVisibilityHandler = () => {
+      if (document.visibilityState !== 'visible') {
+        return
+      }
+      requestForegroundRefresh()
     }
     this.lobbyOnlineHandler = () => {
       if (this.roomSyncPhase === 'failed') {
@@ -1259,8 +1763,12 @@ export class AppController {
       }
       this.requestLobbyRefresh(roomCode, generation, 'online')
     }
+    this.lobbyFocusHandler = requestForegroundRefresh
+    this.lobbyPageShowHandler = requestForegroundRefresh
     document.addEventListener('visibilitychange', this.lobbyVisibilityHandler)
     window.addEventListener('online', this.lobbyOnlineHandler)
+    window.addEventListener('focus', this.lobbyFocusHandler)
+    window.addEventListener('pageshow', this.lobbyPageShowHandler)
   }
 
   private updateLobby(room: Room): boolean {
@@ -1269,7 +1777,7 @@ export class AppController {
       return false
     }
     if (
-      room.status === 'waiting' &&
+      room.status !== 'started' &&
       !this.screenRoot.querySelector('.lobby-screen')
     ) {
       return false
@@ -1311,12 +1819,16 @@ export class AppController {
     )
 
     this.renderLobbySyncUi()
+    this.scheduleLobbyReconciliation(room)
+    if (room.status === 'preparing') {
+      void this.prepareCurrentRoom(room)
+    }
     return true
   }
 
   private renderLobbySyncUi(): void {
     const room = this.currentRoom
-    if (!room || room.status !== 'waiting') {
+    if (!room || room.status === 'started') {
       return
     }
 
@@ -1334,23 +1846,60 @@ export class AppController {
     }
 
     const isHost = room.hostPlayerId === this.playerId
+    const leaveButton = this.screenRoot.querySelector<HTMLButtonElement>(
+      '[data-testid="leave-room"]',
+    )
+    if (leaveButton) {
+      const ownReady =
+        room.status === 'preparing' &&
+        room.start.readyPlayerIds.includes(this.playerId)
+      const leaveWouldAbandonReadyStart =
+        room.status === 'preparing' &&
+        (ownReady || this.roomReadyAckPending || this.roomFinalizePending)
+      leaveButton.disabled = leaveWouldAbandonReadyStart
+      leaveButton.title = leaveWouldAbandonReadyStart
+        ? '기기 준비가 확정돼 공통 시작을 기다리고 있어요.'
+        : room.status === 'preparing'
+          ? '준비 확인 전에는 홈으로 나갈 수 있어요.'
+          : ''
+    }
     startButton.hidden = !isHost
-    startButton.disabled =
-      this.roomStartPending ||
-      this.roomSyncPhase !== 'live' ||
-      !canStartRoom(room, this.playerId)
-    startButton.textContent = this.roomStartPending
-      ? '게임을 시작하고 있어요'
-      : canStartRoom(room, this.playerId)
-        ? `${room.players.length}명으로 시작`
-        : '2명부터 시작할 수 있어요'
+    if (room.status === 'preparing') {
+      startButton.disabled = true
+      startButton.textContent =
+        `준비 ${room.start.readyPlayerIds.length}/${room.start.roster.length}`
+    } else {
+      startButton.disabled =
+        this.roomStartPending ||
+        this.roomSyncPhase !== 'live' ||
+        !canStartRoom(room, this.playerId)
+      startButton.textContent = this.roomStartPending
+        ? '게임을 준비하고 있어요'
+        : canStartRoom(room, this.playerId)
+          ? `${room.players.length}명으로 시작`
+          : '2명부터 시작할 수 있어요'
+    }
 
     let message: string
     switch (this.roomSyncPhase) {
       case 'live':
-        message = isHost
-          ? '참가자가 들어오면 준비 확인 없이 바로 시작할 수 있어요.'
-          : '방장이 시작하면 자동으로 카운트다운이 시작됩니다.'
+        if (room.status === 'preparing') {
+          const readyCount = room.start.readyPlayerIds.length
+          const totalCount = room.start.roster.length
+          const ownReady = room.start.readyPlayerIds.includes(this.playerId)
+          const allReady = readyCount === totalCount
+          message = allReady
+            ? isHost
+              ? '모두 준비 완료 · 공통 시작 시간을 맞추고 있어요.'
+              : '모두 준비 완료 · 방장이 시작 시간을 맞추고 있어요.'
+            : ownReady
+              ? `내 준비 완료 · 다른 기기를 기다리는 중 (${readyCount}/${totalCount})`
+              : `메뉴 이미지와 게임을 준비하는 중 (${readyCount}/${totalCount})`
+        } else {
+          message = isHost
+            ? '시작하면 모든 기기의 준비를 확인한 뒤 함께 출발해요.'
+            : '방장이 시작하면 기기 준비 후 자동으로 카운트다운이 시작됩니다.'
+        }
         break
       case 'recovering':
         message = `방 연결을 다시 확인하고 있어요 (${this.roomSyncRetryCount}/${ROOM_SYNC_RETRY_DELAYS_MS.length}).`
@@ -1376,7 +1925,39 @@ export class AppController {
     if (!currentRoom || currentRoom.code !== room.code) {
       return true
     }
-    if (currentRoom.status === 'started' && room.status === 'waiting') {
+    if (
+      currentRoom.status === 'started' &&
+      room.status !== 'started'
+    ) {
+      return false
+    }
+    if (currentRoom.status === 'preparing' && room.status === 'waiting') {
+      return false
+    }
+    if (
+      currentRoom.status !== 'waiting' &&
+      room.status !== 'waiting' &&
+      currentRoom.start.startId !== room.start.startId
+    ) {
+      this.roomSyncErrorCode = 'SYNC-006'
+      this.logRoomSync('conflicting-start-ignored', room.code, room)
+      return false
+    }
+    if (
+      currentRoom.status === 'preparing' &&
+      room.status === 'preparing' &&
+      currentRoom.start.readyPlayerIds.some(
+        (playerId) => !room.start.readyPlayerIds.includes(playerId),
+      )
+    ) {
+      const ownReadyWasLost =
+        currentRoom.start.readyPlayerIds.includes(this.playerId) &&
+        !room.start.readyPlayerIds.includes(this.playerId)
+      if (ownReadyWasLost) {
+        this.roomReadyAckKey = null
+        this.logRoomSync('own-ready-regression-repair', room.code, room)
+        return true
+      }
       return false
     }
     if (
@@ -1405,7 +1986,7 @@ export class AppController {
       throw new Error('현재 참가자 정보가 방 명단에 없습니다.')
     }
     if (
-      room.status === 'started' &&
+      room.status !== 'waiting' &&
       (!room.start.roster.some(
         (player) => player.playerId === this.playerId,
       ) ||
@@ -1421,7 +2002,7 @@ export class AppController {
     return (
       generation === this.viewGeneration &&
       this.currentRoom?.code === roomCode &&
-      this.currentRoom.status === 'waiting' &&
+      this.currentRoom.status !== 'started' &&
       this.screenRoot.querySelector('.lobby-screen') !== null
     )
   }
@@ -1459,11 +2040,11 @@ export class AppController {
     this.roomStartPending = true
     this.renderLobbySyncUi()
     try {
-      const startedRoom = await this.roomGateway.start(room.code, {
+      const preparedRoom = await this.roomGateway.prepareStart(room.code, {
         requesterPlayerId: this.playerId,
+        startId: createRandomUuid(),
         deckSeed: createDeckSeed(room.code),
         contentVersion: CONTENT_VERSION,
-        startAt: Date.now() + ROOM_COUNTDOWN_MS,
       })
       if (
         generation !== this.viewGeneration ||
@@ -1471,22 +2052,16 @@ export class AppController {
       ) {
         return
       }
-      this.assertLobbyRoomIdentity(startedRoom, room.code)
-      if (!this.shouldAcceptRoomSnapshot(startedRoom)) {
-        return
-      }
-      if (
-        this.currentRoom.status === 'started' &&
-        sameRoomStart(this.currentRoom, startedRoom)
-      ) {
+      this.assertLobbyRoomIdentity(preparedRoom, room.code)
+      if (!this.shouldAcceptRoomSnapshot(preparedRoom)) {
         return
       }
 
       this.roomSyncPhase = 'live'
       this.roomSyncLastEventAt = Date.now()
       this.roomSyncErrorCode = null
-      this.logRoomSync('start-response-accepted', room.code, startedRoom)
-      this.updateLobby(startedRoom)
+      this.logRoomSync('prepare-response-accepted', room.code, preparedRoom)
+      this.updateLobby(preparedRoom)
     } catch (error) {
       startError = toUserMessage(error)
     } finally {
@@ -1499,6 +2074,209 @@ export class AppController {
       }
     }
   }
+
+  private async startTutorial(elements: HomeElements): Promise<void> {
+    if (this.homeActionPending) {
+      return
+    }
+
+    const action = Symbol('tutorial')
+    const generation = this.viewGeneration
+    const options: GameLaunchOptions = {
+      mode: 'solo',
+      launchMode: 'tutorial',
+      mealTime: this.readMealTime(),
+      deckSeed: createDeckSeed('tutorial'),
+    }
+    this.homeActionPending = true
+    this.activeHomeAction = action
+    this.setHomeActionsDisabled(true)
+    elements.status.textContent = '베기와 포획 연습을 준비하고 있어요.'
+
+    try {
+      await this.prepareAndStartGame(
+        options,
+        () => this.isCurrentHomeAction(action, generation),
+      )
+    } catch (error) {
+      if (this.activeHomeAction === action) {
+        elements.status.textContent = toUserMessage(error)
+      }
+    } finally {
+      if (this.activeHomeAction === action) {
+        this.activeHomeAction = null
+        this.homeActionPending = false
+        this.setHomeActionsDisabled(false)
+      }
+    }
+  }
+
+  private async prepareCurrentRoom(room: PreparingRoom): Promise<void> {
+    if (room.start.contentVersion !== CONTENT_VERSION) {
+      this.showLobbyError(
+        '게임 콘텐츠 버전이 달라 준비할 수 없습니다. 새로고침해 주세요.',
+      )
+      return
+    }
+    if (
+      !room.start.roster.some(
+        (player) => player.playerId === this.playerId,
+      )
+    ) {
+      this.showLobbyError('잠긴 참가자 명단에 현재 기기가 없습니다.')
+      return
+    }
+
+    const preparationKey = createRoomPreparationKey(room)
+    if (this.roomPreparationKey !== preparationKey) {
+      this.roomPreparationKey = preparationKey
+      this.roomReadyAckKey = null
+      this.roomFinalizeKey = null
+      this.roomReadyAckPending = false
+      this.roomFinalizePending = false
+      this.roomPreparationTask = this.gameHost.prepare(
+        this.createRoomPreparationLaunchOptions(room),
+      )
+      this.logRoomSync('device-prepare-started', room.code, room)
+    }
+
+    const preparationTask = this.roomPreparationTask
+    if (!preparationTask) {
+      return
+    }
+
+    try {
+      await preparationTask
+    } catch (error) {
+      if (this.isCurrentRoomPreparation(room.code, preparationKey)) {
+        this.showLobbyError(`게임 준비 실패: ${toUserMessage(error)}`)
+      }
+      return
+    }
+    if (!this.isCurrentRoomPreparation(room.code, preparationKey)) {
+      return
+    }
+
+    this.logRoomSync('device-prepare-complete', room.code, room)
+    const latestRoom = this.currentRoom
+    if (
+      !latestRoom ||
+      latestRoom.status !== 'preparing' ||
+      latestRoom.start.startId !== room.start.startId
+    ) {
+      return
+    }
+    if (latestRoom.start.readyPlayerIds.includes(this.playerId)) {
+      this.roomReadyAckKey = preparationKey
+      this.renderLobbySyncUi()
+      void this.finalizePreparedRoomIfHost(latestRoom)
+      return
+    }
+    if (
+      this.roomReadyAckPending ||
+      this.roomReadyAckKey === preparationKey
+    ) {
+      return
+    }
+
+    const generation = this.viewGeneration
+    this.roomReadyAckPending = true
+    this.renderLobbySyncUi()
+    try {
+      const readyRoom = await this.roomGateway.acknowledgeReady(room.code, {
+        playerId: this.playerId,
+        startId: room.start.startId,
+      })
+      if (
+        generation !== this.viewGeneration ||
+        this.currentRoom?.code !== room.code
+      ) {
+        return
+      }
+      this.roomReadyAckKey = preparationKey
+      this.assertLobbyRoomIdentity(readyRoom, room.code)
+      if (this.shouldAcceptRoomSnapshot(readyRoom)) {
+        this.logRoomSync('ready-response-accepted', room.code, readyRoom)
+        this.updateLobby(readyRoom)
+      }
+    } catch (error) {
+      if (this.isCurrentRoomPreparation(room.code, preparationKey)) {
+        this.showLobbyError(`기기 준비 확인 실패: ${toUserMessage(error)}`)
+      }
+    } finally {
+      this.roomReadyAckPending = false
+      if (this.isCurrentRoomPreparation(room.code, preparationKey)) {
+        this.renderLobbySyncUi()
+      }
+    }
+  }
+
+  private async finalizePreparedRoomIfHost(
+    room: PreparingRoom,
+  ): Promise<void> {
+    if (
+      room.hostPlayerId !== this.playerId ||
+      room.start.readyPlayerIds.length !== room.start.roster.length ||
+      room.start.roster.some(
+        (player) => !room.start.readyPlayerIds.includes(player.playerId),
+      )
+    ) {
+      return
+    }
+
+    const preparationKey = createRoomPreparationKey(room)
+    if (
+      this.roomFinalizePending ||
+      this.roomFinalizeKey === preparationKey ||
+      !this.isCurrentRoomPreparation(room.code, preparationKey)
+    ) {
+      return
+    }
+
+    const generation = this.viewGeneration
+    this.roomFinalizePending = true
+    this.renderLobbySyncUi()
+    try {
+      const startedRoom = await this.roomGateway.finalizeStart(room.code, {
+        requesterPlayerId: this.playerId,
+        startId: room.start.startId,
+        startAt: Date.now() + ROOM_COUNTDOWN_MS,
+      })
+      if (
+        generation !== this.viewGeneration ||
+        this.currentRoom?.code !== room.code
+      ) {
+        return
+      }
+      this.roomFinalizeKey = preparationKey
+      this.assertLobbyRoomIdentity(startedRoom, room.code)
+      if (this.shouldAcceptRoomSnapshot(startedRoom)) {
+        this.logRoomSync('finalize-response-accepted', room.code, startedRoom)
+        this.updateLobby(startedRoom)
+      }
+    } catch (error) {
+      if (this.isCurrentRoomPreparation(room.code, preparationKey)) {
+        this.showLobbyError(`공통 시작 시간 확정 실패: ${toUserMessage(error)}`)
+      }
+    } finally {
+      this.roomFinalizePending = false
+      if (this.isCurrentRoomPreparation(room.code, preparationKey)) {
+        this.renderLobbySyncUi()
+      }
+    }
+  }
+
+  private isCurrentRoomPreparation(
+    roomCode: string,
+    preparationKey: string,
+  ): boolean {
+    return (
+      this.isActiveLobby(roomCode, this.viewGeneration) &&
+      this.currentRoom?.status === 'preparing' &&
+      createRoomPreparationKey(this.currentRoom) === preparationKey
+    )
+  }
+
   private scheduleRoomGame(room: StartedRoom): void {
     if (room.start.contentVersion !== CONTENT_VERSION) {
       this.cleanupLobbySync()
@@ -1508,12 +2286,17 @@ export class AppController {
       return
     }
 
-    const scheduleKey = `${room.code}:${String(room.start.deckSeed)}`
+    const scheduleKey = createRoomPreparationKey(room)
     if (this.scheduledRoomKey === scheduleKey) {
       return
     }
     this.scheduledRoomKey = scheduleKey
     const generation = this.viewGeneration
+    const launchOptions = this.createRoomGameLaunchOptions(room)
+    const preparationTask =
+      this.roomPreparationKey === scheduleKey && this.roomPreparationTask
+        ? this.roomPreparationTask
+        : this.gameHost.prepare(launchOptions)
     this.cleanupLobbySync()
 
     this.screenRoot.innerHTML = `
@@ -1525,7 +2308,7 @@ export class AppController {
           role="timer"
           aria-live="polite"
           aria-label="게임 시작까지 남은 시간"
-        >3</strong>
+        >4</strong>
         <span class="countdown-controls">
           <b>드래그</b>해서 베기 · <b>0.3초 꾹</b> 눌러 포획
         </span>
@@ -1551,21 +2334,45 @@ export class AppController {
 
     const delay = Math.max(0, room.start.startAt - Date.now())
     this.gameStartTimeout = window.setTimeout(() => {
-      const currentRoom = this.currentRoom
-      if (
-        generation !== this.viewGeneration ||
-        !currentRoom ||
-        currentRoom.status !== 'started' ||
-        !sameRoomStart(currentRoom, room)
-      ) {
-        return
-      }
-      this.startGame(this.createRoomGameLaunchOptions(room))
-      this.sensoryFeedback.trigger('start', ROOM_EVENT_SOUND_SCALE)
-      this.scheduleRoomResultDeadline(room)
+      void this.prepareAndStartGame(
+        launchOptions,
+        () => {
+          const currentRoom = this.currentRoom
+          return Boolean(
+            generation === this.viewGeneration &&
+              currentRoom &&
+              currentRoom.status === 'started' &&
+              sameRoomStart(currentRoom, room),
+          )
+        },
+        preparationTask,
+      ).then((started) => {
+        if (!started) {
+          return
+        }
+        this.sensoryFeedback.trigger('start', ROOM_EVENT_SOUND_SCALE)
+        this.scheduleRoomResultDeadline(room)
+      })
     }, delay)
   }
+
+  private async prepareAndStartGame(
+    options: GameLaunchOptions,
+    canStart: () => boolean = () => true,
+    preparationTask: Promise<void> = this.gameHost.prepare(options),
+  ): Promise<boolean> {
+    const generation = this.viewGeneration
+    await preparationTask
+    if (generation !== this.viewGeneration || !canStart()) {
+      return false
+    }
+
+    this.startGame(options)
+    return true
+  }
+
   private startGame(options: GameLaunchOptions): void {
+    this.clearSplashTransition()
     this.gameProgressStore.clearForPlayerExcept(
       this.playerId,
       options.progressIdentity ?? null,
@@ -1583,11 +2390,19 @@ export class AppController {
     room: StartedRoom,
   ): GameLaunchOptions {
     return {
+      ...this.createRoomPreparationLaunchOptions(room),
+      progressIdentity: this.createRoomProgressIdentity(room),
+    }
+  }
+
+  private createRoomPreparationLaunchOptions(
+    room: PreparingRoom | StartedRoom,
+  ): GameLaunchOptions {
+    return {
       mode: 'room',
       mealTime: room.mealTime,
       deckSeed: room.start.deckSeed,
       roomCode: room.code,
-      progressIdentity: this.createRoomProgressIdentity(room),
     }
   }
 
@@ -1622,6 +2437,23 @@ export class AppController {
     }
   }
 
+  private assertCanResumePreparingRoom(room: PreparingRoom): void {
+    if (room.start.contentVersion !== CONTENT_VERSION) {
+      throw new Error(
+        '게임 콘텐츠 버전이 달라 준비에 복귀할 수 없습니다. 새로고침해 주세요.',
+      )
+    }
+    if (
+      !room.start.roster.some(
+        (player) => player.playerId === this.playerId,
+      )
+    ) {
+      throw new Error(
+        '이미 준비 중인 방입니다. 잠긴 참가자 명단에 있는 플레이어만 복귀할 수 있습니다.',
+      )
+    }
+  }
+
   private async resumeStartedRoom(
     room: StartedRoom,
     resultState: Readonly<AuthoritativeRoomResultState>,
@@ -1636,12 +2468,24 @@ export class AppController {
     const ownResult = resultState.results.find(
       (result) => result.playerId === this.playerId,
     )
+    if (ownResult) {
+      this.personalBestStore.record(
+        {
+          mode: 'room',
+          mealTime: room.mealTime,
+          contentVersion: CONTENT_VERSION,
+        },
+        ownResult.score,
+        ownResult.completedAt,
+        room.start.deckSeed,
+      )
+    }
     if (ownResult || resultState.finalization === 'closed') {
       this.gameProgressStore.clear(this.createRoomProgressIdentity(room))
     }
     if (resultState.finalization === 'open' && !ownResult) {
-      this.startGame(this.createRoomGameLaunchOptions(room))
-      this.scheduleRoomResultDeadline(room)
+      this.screenRoot.hidden = false
+      this.scheduleRoomGame(room)
       return
     }
 
@@ -1682,6 +2526,16 @@ export class AppController {
   private async handleGameResult(
     result: Readonly<PlayerGameResult>,
   ): Promise<void> {
+    this.personalBestStore.record(
+      {
+        mode: result.mode,
+        mealTime: result.mealTime,
+        contentVersion: CONTENT_VERSION,
+      },
+      result.score,
+      result.completedAt,
+      result.deckSeed,
+    )
     if (result.mode !== 'room') {
       return
     }
@@ -1958,7 +2812,7 @@ export class AppController {
       this.currentRoom &&
         this.currentRoom.status === 'started' &&
         this.currentRoom.code === room.code &&
-        this.currentRoom.start.deckSeed === room.start.deckSeed,
+        this.currentRoom.start.startId === room.start.startId,
     )
   }
 
@@ -2035,15 +2889,17 @@ export class AppController {
         data-testid="room-results-waiting"
       >
         <header class="results-heading">
-          <p class="eyebrow">${
-            this.backend === 'local'
-              ? 'LOCAL RESULT SYNC'
-              : 'FIREBASE RESULT SYNC'
-          }</p>
-          <h1>친구들의 결과를 기다리는 중</h1>
-          <p>잠긴 참가자 명단의 결과가 모두 도착하면 함께 공개돼요.</p>
+          <img
+            class="screen-chef-cat waiting-chef-cat"
+            src="${chefCatImageUrl}"
+            alt=""
+            aria-hidden="true"
+          />
+          <p class="eyebrow">DINNER TABLE READY</p>
+          <h1>친구들의 한 끼를 차리는 중</h1>
+          <p>모두의 메뉴가 도착하면 함께 공개해요.</p>
           <p class="result-deadline-copy">
-            마감까지 결과가 없으면 0점·빈 포획의 미완주로 처리해요.
+            약속한 시간이 되면 도착한 메뉴부터 먼저 열어볼 수 있어요.
             <strong data-testid="result-deadline-countdown">${formatResultDeadlineRemaining(
               flow.room.start.resultDeadlineAt,
             )}</strong>
@@ -2174,42 +3030,94 @@ export class AppController {
     summary: Readonly<FinalRoomResultsSummary>,
   ): void {
     this.clearRoomResultDeadline()
+    const mealLabel = room.mealTime === 'lunch' ? '점심' : '저녁'
+    const winnerPickHeading =
+      summary.winners.length === 0
+        ? '완주자 없음'
+        : summary.winners.length === 1
+          ? `1등의 ${mealLabel} PICK`
+          : `공동 1등의 ${mealLabel} PICK`
+    const completedStandings = summary.standings.filter(
+      (standing) => !standing.didNotFinish,
+    )
+    const menuCandidates = resolveRoomMenuCandidates(summary)
+    const exactOverlaps =
+      menuCandidates.kind === 'exact-menu' ? menuCandidates.overlaps : []
+    const categoryAffinities =
+      menuCandidates.kind === 'category-affinity'
+        ? menuCandidates.affinities
+        : []
+    const individualPicks =
+      menuCandidates.kind === 'individual-picks' ? menuCandidates.picks : []
+    const overlapMaxCount = exactOverlaps[0]?.captureCount ?? 0
+    const categoryMatchCount = categoryAffinities[0]?.matchCount ?? 0
+    const matchEyebrow =
+      menuCandidates.kind === 'exact-menu'
+        ? 'MATCHED PICKS'
+        : menuCandidates.kind === 'category-affinity'
+          ? 'TASTE MATCH'
+          : 'TODAY CANDIDATES'
+    const matchHeading =
+      menuCandidates.kind === 'exact-menu'
+        ? '정확히 겹친 오늘의 메뉴'
+        : menuCandidates.kind === 'category-affinity'
+          ? '가까운 취향으로 고른 후보'
+          : menuCandidates.kind === 'individual-picks'
+            ? '각자의 PICK에서 고르기'
+            : '오늘의 메뉴 후보'
+    const matchCountLabel =
+      menuCandidates.kind === 'exact-menu'
+        ? String(overlapMaxCount) + '회 선택'
+        : menuCandidates.kind === 'category-affinity'
+          ? String(categoryMatchCount) + '명 일치'
+          : menuCandidates.kind === 'individual-picks'
+            ? String(individualPicks.length) + '명 후보'
+            : '후보 없음'
+    const personalBest = this.personalBestStore.read({
+      mode: 'room',
+      mealTime: room.mealTime,
+      contentVersion: CONTENT_VERSION,
+    })
     this.screenRoot.innerHTML = `
       <div
         class="app-screen room-results-screen"
         data-testid="room-results-summary"
       >
         <header class="results-heading results-heading-complete">
-          <p class="eyebrow">ROOM ${room.code} · FINAL</p>
-          <h1>오늘의 경기 결과</h1>
-          <p>점수와 포획 메뉴를 보고 함께 식사를 골라보세요.</p>
+          <p class="eyebrow">ROOM ${room.code} · MENU FINAL</p>
+          <h1>오늘의 메뉴 챔피언</h1>
+          <p>오늘 마음이 가장 끌린 한 끼를 함께 만나보세요.</p>
         </header>
 
-        <section class="result-section standings-section">
-          <div class="result-section-heading">
-            <div>
-              <span>RANKING</span>
-              <h2>최종 순위</h2>
-            </div>
-            <small>${summary.standings.length}명</small>
+        <section
+          class="result-celebration"
+          data-testid="result-celebration"
+        >
+          <span class="result-confetti confetti-one" aria-hidden="true"></span>
+          <span class="result-confetti confetti-two" aria-hidden="true"></span>
+          <span class="result-confetti confetti-three" aria-hidden="true"></span>
+          <span class="result-confetti confetti-four" aria-hidden="true"></span>
+          <span class="result-confetti confetti-five" aria-hidden="true"></span>
+          <span class="result-confetti confetti-six" aria-hidden="true"></span>
+          <img
+            class="screen-chef-cat result-chef-cat"
+            src="${chefCatImageUrl}"
+            alt=""
+            aria-hidden="true"
+          />
+          <div class="result-celebration-copy">
+            <span>MENU CHAMPION</span>
+            <h2 data-testid="result-celebration-title"></h2>
+            <strong data-testid="result-celebration-score"></strong>
+            <p>오늘의 메뉴 선택이 완성됐어요!</p>
           </div>
-          <ol
-            class="result-standings"
-            data-testid="result-standings"
-          ></ol>
         </section>
 
-        <section class="result-section winner-section">
+        <section class="result-section winner-section result-winner-showcase">
           <div class="result-section-heading">
             <div>
               <span>WINNER PICKS</span>
-              <h2>${
-                summary.winners.length === 0
-                  ? '완주자 없음'
-                  : summary.winners.length === 1
-                  ? '단독 1등 메뉴'
-                  : '공동 1등 메뉴'
-              }</h2>
+              <h2 data-testid="winner-pick-heading">${winnerPickHeading}</h2>
             </div>
           </div>
           <div
@@ -2221,9 +3129,10 @@ export class AppController {
         <section class="result-section overlap-section">
           <div class="result-section-heading">
             <div>
-              <span>MATCHED PICKS</span>
-              <h2>공동 최다 겹침 메뉴</h2>
+              <span>${matchEyebrow}</span>
+              <h2 data-testid="overlap-heading">${matchHeading}</h2>
             </div>
+            <small data-testid="overlap-max-count">${matchCountLabel}</small>
           </div>
           <div
             class="overlap-list"
@@ -2236,13 +3145,63 @@ export class AppController {
           data-testid="result-outcome"
         ></section>
 
-        <button
-          class="button button-accent result-home-button"
-          type="button"
-          data-testid="result-home"
-        >홈으로</button>
+        <section
+          class="result-personal-best"
+          data-testid="result-personal-best"
+        >
+          <span>이 기기 최고 기록</span>
+          <strong>${personalBest ? `${formatScore(personalBest.score)}점` : '첫 기록 대기 중'}</strong>
+          <small>모드와 식사 시간별로 이 기기에만 저장돼요.</small>
+        </section>
+
+        <section class="result-section standings-section">
+          <div class="result-section-heading">
+            <div>
+              <span>DETAIL RANKING</span>
+              <h2>상세 순위</h2>
+            </div>
+            <small>${summary.standings.length}명</small>
+          </div>
+          <ol
+            class="result-standings"
+            data-testid="result-standings"
+          ></ol>
+        </section>
+
+        <div class="result-actions">
+          <button
+            class="button button-accent"
+            type="button"
+            data-testid="result-new-menu"
+          >새 메뉴 고르기</button>
+          <button
+            class="button button-ghost result-home-button"
+            type="button"
+            data-testid="result-home"
+          >홈으로</button>
+        </div>
       </div>
     `
+
+    const heroTitle = this.query<HTMLElement>(
+      '[data-testid="result-celebration-title"]',
+    )
+    const heroScore = this.query<HTMLElement>(
+      '[data-testid="result-celebration-score"]',
+    )
+    const winner = summary.winners[0]
+
+    if (winner === undefined) {
+      heroTitle.textContent = '오늘의 도전 완료!'
+      heroScore.textContent = '다음 판의 메뉴 챔피언을 기다려요'
+    } else if (summary.winners.length === 1) {
+      heroTitle.textContent = `${winner.displayName} 우승!`
+      heroScore.textContent = `${formatScore(winner.score)}점`
+    } else {
+      heroTitle.textContent = '공동 메뉴 챔피언!'
+      heroScore.textContent =
+        `${summary.winners.length}명 · ${formatScore(winner.score)}점`
+    }
 
     const standings = this.query<HTMLOListElement>(
       '[data-testid="result-standings"]',
@@ -2321,16 +3280,90 @@ export class AppController {
     const overlapSummary = this.query<HTMLElement>(
       '[data-testid="overlap-summary"]',
     )
-    if (summary.mostOverlappedMenus.length === 0) {
-      const empty = document.createElement('p')
-      empty.className = 'result-empty-copy'
-      const winnerCapturedAnyMenu = summary.winners.some(
-        (winner) => winner.capturedMenuIds.length > 0,
-      )
-      empty.textContent = winnerCapturedAnyMenu
-        ? '겹친 메뉴가 없어요. 1등의 포획 메뉴를 보며 함께 골라보세요.'
-        : '겹친 메뉴와 1등의 포획 메뉴가 없어요. 순위를 참고해 함께 골라보세요.'
-      overlapSummary.append(empty)
+    if (menuCandidates.kind !== 'exact-menu') {
+      if (categoryAffinities.length > 0) {
+        const nameByPlayerId = new Map(
+          summary.standings.map((standing) => [
+            standing.playerId,
+            standing.displayName,
+          ]),
+        )
+
+        overlapSummary.append(
+          ...categoryAffinities.map((affinity) => {
+            const card = document.createElement('article')
+            card.className = 'overlap-card category-affinity-card'
+            card.dataset.testid = 'category-affinity'
+            card.dataset.category = affinity.category
+
+            const icon = document.createElement('div')
+            icon.className = 'category-affinity-icon'
+            icon.setAttribute('aria-hidden', 'true')
+            icon.textContent = affinity.emoji
+
+            const copy = document.createElement('div')
+            copy.className = 'category-affinity-copy'
+            const count = document.createElement('strong')
+            const recommendation = document.createElement('small')
+            const selections = document.createElement('span')
+            const everyFinisherMatched =
+              affinity.matchCount === completedStandings.length
+            const matchSubject = everyFinisherMatched
+              ? affinity.matchCount === 2
+                ? '둘 다'
+                : String(affinity.matchCount) + '명 모두'
+              : String(affinity.matchCount) + '명이'
+            count.textContent = matchSubject + ' ' + affinity.labelKo
+            recommendation.className = 'category-affinity-recommendation'
+            recommendation.textContent = affinity.recommendationKo
+            selections.className = 'category-affinity-selections'
+            selections.textContent = affinity.selections
+              .map((selection) => {
+                const playerName =
+                  nameByPlayerId.get(selection.playerId) ?? selection.playerId
+                const menuNames = selection.menuIds.map(
+                  (menuId) => MENU_BY_ID.get(menuId)?.nameKo ?? menuId,
+                )
+                return playerName + ': ' + menuNames.join(' · ')
+              })
+              .join(' / ')
+            copy.append(count, recommendation, selections)
+            card.append(icon, copy)
+            return card
+          }),
+        )
+      } else if (individualPicks.length > 0) {
+        overlapSummary.append(
+          ...individualPicks.map((pick) => {
+            const card = document.createElement('article')
+            card.className = 'overlap-card individual-pick-card'
+            card.dataset.testid = 'individual-pick'
+
+            const copy = document.createElement('div')
+            const heading = document.createElement('strong')
+            const hint = document.createElement('span')
+            heading.textContent = `${pick.displayName}의 PICK`
+            hint.textContent = '정확히 겹치지 않아도 각자 고른 메뉴를 후보로 남겼어요.'
+            copy.append(heading, hint)
+
+            const slots = document.createElement('div')
+            slots.className = 'result-capture-slots'
+            slots.append(
+              ...pick.menuIds.map((menuId) =>
+                this.createResultMenuSlot(menuId),
+              ),
+            )
+            card.append(slots, copy)
+            return card
+          }),
+        )
+      } else {
+        const empty = document.createElement('p')
+        empty.className = 'result-empty-copy'
+        empty.textContent =
+          '포획한 메뉴가 아직 없어요. 상세 순위를 참고해 한 끼를 함께 골라보세요.'
+        overlapSummary.append(empty)
+      }
     } else {
       const nameByPlayerId = new Map(
         summary.standings.map((standing) => [
@@ -2340,7 +3373,7 @@ export class AppController {
       )
 
       overlapSummary.append(
-        ...summary.mostOverlappedMenus.map((overlap) => {
+        ...exactOverlaps.map((overlap) => {
           const card = document.createElement('article')
           card.className = 'overlap-card'
           card.dataset.testid = 'overlapped-menu'
@@ -2348,7 +3381,7 @@ export class AppController {
           const copy = document.createElement('div')
           const count = document.createElement('strong')
           const capturers = document.createElement('span')
-          count.textContent = `${overlap.captureCount}명 포획`
+          count.textContent = `${overlap.captureCount}회 선택`
           capturers.textContent = overlap.playerIds
             .map(
               (playerId) =>
@@ -2387,6 +3420,11 @@ export class AppController {
     }
     outcome.append(outcomeTitle, outcomeCopy)
 
+    this.query<HTMLButtonElement>(
+      '[data-testid="result-new-menu"]',
+    ).addEventListener('click', () => {
+      this.returnHome()
+    })
     this.query<HTMLButtonElement>(
       '[data-testid="result-home"]',
     ).addEventListener('click', () => {
@@ -2531,6 +3569,7 @@ export class AppController {
   }
 
   private returnHome(): void {
+    this.markSplashEntered()
     this.gameProgressStore.clearForPlayer(this.playerId)
     const url = new URL(window.location.href)
     url.searchParams.delete('room')
@@ -2547,6 +3586,12 @@ export class AppController {
     this.activeRoomResultFlow = null
     this.currentRoom = null
     this.scheduledRoomKey = null
+    this.roomPreparationKey = null
+    this.roomPreparationTask = null
+    this.roomReadyAckKey = null
+    this.roomReadyAckPending = false
+    this.roomFinalizeKey = null
+    this.roomFinalizePending = false
     this.roomSyncLastEventAt = null
   }
 
@@ -2556,6 +3601,7 @@ export class AppController {
   }
 
   private cleanupLobbySync(): void {
+    this.clearLobbyReconciliation()
     this.dropRoomSubscription()
     this.clearRoomSyncRetryTimeout()
     this.cleanupLobbyRecoveryTriggers()
@@ -2572,6 +3618,8 @@ export class AppController {
 
   private dropRoomSubscription(): void {
     this.roomSyncConnectionToken += 1
+    this.roomSyncServerConnectionToken = null
+    this.roomSyncNeedsReconnect = false
     this.unsubscribeRoom?.()
     this.unsubscribeRoom = null
     this.clearRoomSyncWatchdog()
@@ -2591,6 +3639,13 @@ export class AppController {
     }
   }
 
+  private clearLobbyReconciliation(): void {
+    if (this.roomSyncReconciliationTimeout !== null) {
+      window.clearTimeout(this.roomSyncReconciliationTimeout)
+      this.roomSyncReconciliationTimeout = null
+    }
+  }
+
   private cleanupLobbyRecoveryTriggers(): void {
     if (this.lobbyVisibilityHandler) {
       document.removeEventListener(
@@ -2602,6 +3657,14 @@ export class AppController {
     if (this.lobbyOnlineHandler) {
       window.removeEventListener('online', this.lobbyOnlineHandler)
       this.lobbyOnlineHandler = null
+    }
+    if (this.lobbyFocusHandler) {
+      window.removeEventListener('focus', this.lobbyFocusHandler)
+      this.lobbyFocusHandler = null
+    }
+    if (this.lobbyPageShowHandler) {
+      window.removeEventListener('pageshow', this.lobbyPageShowHandler)
+      this.lobbyPageShowHandler = null
     }
   }
   private clearCountdown(): void {
@@ -2709,6 +3772,7 @@ export class AppController {
     for (const button of this.screenRoot.querySelectorAll<HTMLButtonElement>(
       [
         '[data-testid="solo-start"]',
+        '[data-testid="tutorial-start"]',
         '[data-testid="create-room"]',
         '[data-testid="join-room"]',
       ].join(', '),
@@ -2739,6 +3803,7 @@ export class AppController {
 function sameRoomStart(left: StartedRoom, right: StartedRoom): boolean {
   return (
     left.code === right.code &&
+    left.start.startId === right.start.startId &&
     left.start.deckSeed === right.start.deckSeed &&
     left.start.contentVersion === right.start.contentVersion &&
     left.start.startAt === right.start.startAt &&
@@ -2754,6 +3819,13 @@ function sameRoomStart(left: StartedRoom, right: StartedRoom): boolean {
     })
   )
 }
+
+function createRoomPreparationKey(
+  room: PreparingRoom | StartedRoom,
+): string {
+  return `${room.code}:${room.start.startId}`
+}
+
 function getOrCreatePlayerId(): string {
   const existing = sessionStorage.getItem(PLAYER_ID_STORAGE_KEY)
   if (existing) {

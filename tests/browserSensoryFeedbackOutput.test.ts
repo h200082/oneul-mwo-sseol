@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   BrowserSensoryFeedbackOutput,
+  NARRATION_CACHE_MAX_ENTRIES,
+  NARRATION_PRELOAD_CONCURRENCY,
   type SensoryTone,
 } from '../src/feedback/SensoryFeedback'
 
@@ -84,14 +86,21 @@ class FakeDocument {
 }
 
 class FakeAudioParam {
-  readonly setValueAtTime = vi.fn(
-    (_value: number, _startTime: number) => this,
-  )
-  readonly linearRampToValueAtTime = vi.fn(
-    (_value: number, _endTime: number) => this,
-  )
+  value = 1
+  readonly cancelScheduledValues = vi.fn((_startTime: number) => this)
+  readonly setValueAtTime = vi.fn((value: number, _startTime: number) => {
+    this.value = value
+    return this
+  })
+  readonly linearRampToValueAtTime = vi.fn((value: number, _endTime: number) => {
+    this.value = value
+    return this
+  })
   readonly exponentialRampToValueAtTime = vi.fn(
-    (_value: number, _endTime: number) => this,
+    (value: number, _endTime: number) => {
+      this.value = value
+      return this
+    },
   )
 }
 
@@ -108,6 +117,7 @@ interface FakeOscillatorOptions {
 }
 
 class FakeOscillatorNode {
+  private ended = false
   readonly frequency = new FakeAudioParam()
   type: OscillatorType = 'sine'
   onended: (() => void) | null = null
@@ -125,14 +135,48 @@ class FakeOscillatorNode {
     if (when !== undefined && this.options.scheduledStopThrows) {
       throw new Error('scheduled stop failed')
     }
+    if (when === undefined) {
+      queueMicrotask(() => this.finish())
+    }
   })
 
+  finish(): void {
+    if (this.ended) return
+    this.ended = true
+    this.onended?.()
+  }
+
   constructor(private readonly options: FakeOscillatorOptions) {}
+}
+
+interface FakeAudioBufferSourceOptions {
+  readonly startThrows?: boolean
+}
+
+class FakeAudioBufferSourceNode {
+  buffer: AudioBuffer | null = null
+  onended: (() => void) | null = null
+  readonly connect = vi.fn((_destination: unknown) => this)
+  readonly disconnect = vi.fn()
+  readonly start = vi.fn((_when?: number) => {
+    if (this.options.startThrows) {
+      throw new Error('buffer source start failed')
+    }
+  })
+  readonly stop = vi.fn(() => undefined)
+
+  finish(): void {
+    this.onended?.()
+  }
+
+  constructor(private readonly options: FakeAudioBufferSourceOptions = {}) {}
 }
 
 interface FakeAudioContextOptions {
   readonly resume?: () => Promise<void>
   readonly oscillator?: FakeOscillatorOptions
+  readonly bufferSource?: FakeAudioBufferSourceOptions
+  readonly decodeRejects?: boolean
   readonly masterGainThrows?: boolean
 }
 
@@ -142,6 +186,7 @@ class FakeAudioContext {
   readonly destination = {}
   readonly gains: FakeGainNode[] = []
   readonly oscillators: FakeOscillatorNode[] = []
+  readonly bufferSources: FakeAudioBufferSourceNode[] = []
   readonly createGain = vi.fn(() => {
     if (this.options.masterGainThrows && this.gains.length === 0) {
       throw new Error('master gain failed')
@@ -156,6 +201,17 @@ class FakeAudioContext {
     )
     this.oscillators.push(oscillator)
     return oscillator
+  })
+  readonly createBufferSource = vi.fn(() => {
+    const source = new FakeAudioBufferSourceNode(this.options.bufferSource)
+    this.bufferSources.push(source)
+    return source
+  })
+  readonly decodeAudioData = vi.fn(async (_bytes: ArrayBuffer) => {
+    if (this.options.decodeRejects) {
+      throw new Error('decode failed')
+    }
+    return { duration: 1 } as AudioBuffer
   })
   readonly resume = vi.fn(async () => {
     await this.options.resume?.()
@@ -202,6 +258,7 @@ function createNavigator(
 function createOutput(
   options: FakeAudioContextOptions = {},
   navigatorObject: Navigator = createNavigator(),
+  narrationLoader?: (url: string) => Promise<ArrayBuffer>,
 ) {
   const documentObject = new FakeDocument()
   const harness = createAudioHarness(options)
@@ -209,6 +266,7 @@ function createOutput(
     harness.windowObject,
     documentObject as unknown as Document,
     navigatorObject,
+    narrationLoader,
   )
   return { documentObject, harness, output }
 }
@@ -422,6 +480,157 @@ describe('BrowserSensoryFeedbackOutput', () => {
     expect(context.resume).toHaveBeenCalledTimes(3)
   })
 
+  it('uses one scheduler for repeated starts and live intensity changes', async () => {
+    vi.useFakeTimers()
+    const { harness, output } = createOutput()
+
+    try {
+      await expect(output.unlock()).resolves.toBe(true)
+      expect(output.startMusic('opening')).toBe(true)
+      const context = harness.contexts[0]!
+      const firstSourceCount = context.oscillators.length
+      expect(firstSourceCount).toBeGreaterThan(0)
+      expect(output.musicPlaying).toBe(true)
+      expect(output.musicStartCount).toBe(1)
+      expect(vi.getTimerCount()).toBe(1)
+
+      expect(output.startMusic('opening')).toBe(true)
+      expect(output.startMusic('rotation')).toBe(true)
+      expect(output.startMusic('final-five')).toBe(true)
+      expect(output.startMusic('final-two')).toBe(true)
+
+      expect(harness.contexts).toHaveLength(1)
+      expect(context.oscillators).toHaveLength(firstSourceCount)
+      expect(output.musicStartCount).toBe(1)
+      expect(vi.getTimerCount()).toBe(1)
+
+      output.stopMusic()
+      expect(output.musicPlaying).toBe(false)
+      expect(vi.getTimerCount()).toBe(0)
+
+      expect(output.startMusic('final-two')).toBe(true)
+      expect(output.musicStartCount).toBe(2)
+      expect(vi.getTimerCount()).toBe(1)
+      expect(context.oscillators.length).toBeGreaterThan(firstSourceCount)
+    } finally {
+      output.destroy()
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops only music while leaving an active sound effect intact', async () => {
+    vi.useFakeTimers()
+    const { harness, output } = createOutput()
+
+    try {
+      await expect(output.unlock()).resolves.toBe(true)
+      expect(output.startMusic('opening')).toBe(true)
+      const context = harness.contexts[0]!
+      const musicSources = [...context.oscillators]
+      expect(musicSources.length).toBeGreaterThan(0)
+
+      expect(output.play([FIRST_TONE], 1)).toBe(true)
+      const effectSource = context.oscillators.at(-1)!
+      expect(musicSources).not.toContain(effectSource)
+      expect(effectSource.stop).toHaveBeenCalledOnce()
+
+      output.stopMusic()
+
+      expect(output.musicPlaying).toBe(false)
+      expect(vi.getTimerCount()).toBe(0)
+      for (const source of musicSources) {
+        expect(source.stop).toHaveBeenCalledTimes(2)
+        expect(source.stop.mock.calls.at(-1)?.[0]).toBeUndefined()
+        expect(source.disconnect).toHaveBeenCalledOnce()
+      }
+      expect(effectSource.stop).toHaveBeenCalledOnce()
+      expect(effectSource.disconnect).not.toHaveBeenCalled()
+
+      output.stopSound()
+      await Promise.resolve()
+      expect(effectSource.stop).toHaveBeenCalledTimes(2)
+      expect(effectSource.disconnect).toHaveBeenCalledOnce()
+    } finally {
+      output.destroy()
+      vi.useRealTimers()
+    }
+  })
+
+  it('pauses music while hidden and resumes the requested intensity once visible', async () => {
+    vi.useFakeTimers()
+    const { documentObject, harness, output } = createOutput()
+
+    try {
+      await expect(output.unlock()).resolves.toBe(true)
+      expect(output.startMusic('final-five')).toBe(true)
+      const context = harness.contexts[0]!
+      const firstSessionSources = context.oscillators.length
+      expect(output.musicStartCount).toBe(1)
+
+      documentObject.setHidden(true)
+      await Promise.resolve()
+
+      expect(output.musicPlaying).toBe(false)
+      expect(vi.getTimerCount()).toBe(0)
+      expect(context.suspend).toHaveBeenCalledOnce()
+      expect(context.state).toBe('suspended')
+
+      documentObject.setHidden(false)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(context.resume).toHaveBeenCalledTimes(2)
+      expect(context.state).toBe('running')
+      expect(output.musicPlaying).toBe(true)
+      expect(output.musicStartCount).toBe(2)
+      expect(vi.getTimerCount()).toBe(1)
+      expect(context.oscillators.length).toBeGreaterThan(firstSessionSources)
+    } finally {
+      output.destroy()
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears scheduler, sources, gains, and context on destroy', async () => {
+    vi.useFakeTimers()
+    const { harness, output } = createOutput()
+
+    try {
+      await expect(output.unlock()).resolves.toBe(true)
+      expect(output.startMusic('final-two')).toBe(true)
+      expect(output.play([FIRST_TONE], 1)).toBe(true)
+      const context = harness.contexts[0]!
+      const sourceCount = context.oscillators.length
+      expect(vi.getTimerCount()).toBe(1)
+
+      output.destroy()
+      await Promise.resolve()
+
+      expect(output.audioState).toBe('closed')
+      expect(output.musicPlaying).toBe(false)
+      expect(vi.getTimerCount()).toBe(0)
+      expect(context.close).toHaveBeenCalledOnce()
+      expect(
+        context.oscillators.every(
+          (source) => source.stop.mock.calls.length >= 2,
+        ),
+      ).toBe(true)
+      expect(
+        context.oscillators.every(
+          (source) => source.disconnect.mock.calls.length === 1,
+        ),
+      ).toBe(true)
+      expect(
+        context.gains.every((gain) => gain.disconnect.mock.calls.length === 1),
+      ).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(context.oscillators).toHaveLength(sourceCount)
+    } finally {
+      output.destroy()
+      vi.useRealTimers()
+    }
+  })
   it('returns false instead of throwing when vibration fails or is rejected', () => {
     const vibrate = vi
       .fn<(pattern: VibratePattern) => boolean>()
@@ -483,5 +692,339 @@ describe('BrowserSensoryFeedbackOutput', () => {
         (oscillator) => oscillator.stop.mock.calls.length === 2,
       ),
     ).toBe(true)
+  })
+  it('keeps null or unprepared narrations silent without ducking music', async () => {
+    vi.useFakeTimers()
+    const { output } = createOutput()
+    try {
+      await expect(output.unlock()).resolves.toBe(true)
+      expect(output.startMusic('opening')).toBe(true)
+
+      expect(output.playNarration('ramyeon')).toBe(false)
+      expect(output.narrationPreparedCount).toBe(0)
+      expect(output.narrationPlaying).toBe(false)
+      expect(output.musicDucked).toBe(false)
+    } finally {
+      output.destroy()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the newest narration URL when an older load resolves last', async () => {
+    const firstLoad = createDeferred<ArrayBuffer>()
+    const secondLoad = createDeferred<ArrayBuffer>()
+    const narrationLoader = vi.fn((url: string) => {
+      if (url === '/ramyeon-a.mp3') return firstLoad.promise
+      if (url === '/ramyeon-b.mp3') return secondLoad.promise
+      throw new Error(`Unexpected narration URL: ${url}`)
+    })
+    const { harness, output } = createOutput(
+      {},
+      createNavigator(),
+      narrationLoader,
+    )
+
+    try {
+      await expect(output.unlock()).resolves.toBe(true)
+      const context = harness.contexts[0]!
+      context.decodeAudioData.mockImplementation(async (bytes: ArrayBuffer) =>
+        ({ duration: new Uint8Array(bytes)[0] ?? 0 }) as AudioBuffer,
+      )
+
+      const preparingA = output.prepareNarrations([
+        { id: 'ramyeon', url: '/ramyeon-a.mp3' },
+      ])
+      await vi.waitFor(() => {
+        expect(narrationLoader).toHaveBeenCalledOnce()
+      })
+      const preparingB = output.prepareNarrations([
+        { id: 'ramyeon', url: '/ramyeon-b.mp3' },
+      ])
+
+      secondLoad.resolve(Uint8Array.of(2).buffer)
+      await preparingB
+      expect(output.narrationPreparedCount).toBe(1)
+      firstLoad.resolve(Uint8Array.of(1).buffer)
+      await preparingA
+
+      expect(narrationLoader).toHaveBeenCalledTimes(2)
+      expect(context.decodeAudioData).toHaveBeenCalledOnce()
+      const decodedBytes = context.decodeAudioData.mock.calls[0]![0]
+      expect(new Uint8Array(decodedBytes)[0]).toBe(2)
+      expect(output.narrationPreparedCount).toBe(1)
+
+      expect(output.playNarration('ramyeon')).toBe(true)
+      expect(context.bufferSources).toHaveLength(1)
+      expect(context.bufferSources[0]!.buffer).toEqual({ duration: 2 })
+    } finally {
+      output.destroy()
+    }
+  })
+
+  it('deduplicates prepared clips, replaces the active voice, and guards BGM duck restoration', async () => {
+    vi.useFakeTimers()
+    const narrationLoader = vi.fn(async (_url: string) => new ArrayBuffer(12))
+    const { harness, output } = createOutput(
+      {},
+      createNavigator(),
+      narrationLoader,
+    )
+
+    try {
+      await expect(output.unlock()).resolves.toBe(true)
+      await expect(
+        output.prepareNarrations([
+          { id: 'ramyeon', url: '/ramyeon.mp3' },
+          { id: 'ramyeon', url: '/ramyeon.mp3' },
+        ]),
+      ).resolves.toBeUndefined()
+      expect(narrationLoader).toHaveBeenCalledOnce()
+      expect(output.narrationPreparedCount).toBe(1)
+
+      expect(output.startMusic('rotation')).toBe(true)
+      const context = harness.contexts[0]!
+      const musicGain = context.gains[1]!
+      expect(output.playNarration('ramyeon')).toBe(true)
+      expect(output.narrationPlaying).toBe(true)
+      expect(output.musicDucked).toBe(true)
+      expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(
+        0.13,
+        context.currentTime + 0.045,
+      )
+
+      const firstSource = context.bufferSources[0]!
+      expect(output.playNarration('ramyeon')).toBe(true)
+      expect(firstSource.stop).toHaveBeenCalledOnce()
+      firstSource.finish()
+      expect(output.musicDucked).toBe(true)
+
+      const secondSource = context.bufferSources[1]!
+      secondSource.finish()
+      expect(output.narrationPlaying).toBe(false)
+      expect(output.musicDucked).toBe(false)
+      expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(
+        0.26,
+        context.currentTime + 0.12,
+      )
+    } finally {
+      output.destroy()
+      vi.useRealTimers()
+    }
+  })
+
+  it('falls back without a queue when optional MP3 decoding fails', async () => {
+    const narrationLoader = vi.fn(async (_url: string) => new ArrayBuffer(8))
+    const { harness, output } = createOutput(
+      { decodeRejects: true },
+      createNavigator(),
+      narrationLoader,
+    )
+    await expect(output.unlock()).resolves.toBe(true)
+    await expect(
+      output.prepareNarrations([{ id: 'pasta', url: '/pasta.mp3' }]),
+    ).resolves.toBeUndefined()
+
+    expect(harness.contexts[0]!.decodeAudioData).toHaveBeenCalledOnce()
+    expect(output.narrationPreparedCount).toBe(0)
+    expect(output.playNarration('pasta')).toBe(false)
+    expect(output.narrationPlaying).toBe(false)
+    expect(output.musicDucked).toBe(false)
+    output.destroy()
+  })
+  it('drops an active narration on hide and resumes only requested BGM when visible', async () => {
+    vi.useFakeTimers()
+    const narrationLoader = vi.fn(async (_url: string) => new ArrayBuffer(10))
+    const { documentObject, harness, output } = createOutput(
+      {},
+      createNavigator(),
+      narrationLoader,
+    )
+
+    try {
+      await expect(output.unlock()).resolves.toBe(true)
+      await output.prepareNarrations([
+        { id: 'shabu-shabu', url: '/shabu-shabu.mp3' },
+      ])
+      expect(output.startMusic('final-two')).toBe(true)
+      expect(output.playNarration('shabu-shabu')).toBe(true)
+      const narrationSource = harness.contexts[0]!.bufferSources[0]!
+
+      documentObject.setHidden(true)
+      await Promise.resolve()
+      expect(narrationSource.stop).toHaveBeenCalledOnce()
+      expect(output.narrationPlaying).toBe(false)
+      expect(output.musicDucked).toBe(false)
+      expect(output.musicPlaying).toBe(false)
+
+      documentObject.setHidden(false)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(output.musicPlaying).toBe(true)
+      expect(output.narrationPlaying).toBe(false)
+      expect(harness.contexts[0]!.bufferSources).toHaveLength(1)
+    } finally {
+      output.destroy()
+      vi.useRealTimers()
+    }
+  })
+  it('loads opening-round voices first with a global max-three queue and deduplicates repeated preparation', async () => {
+    const pendingLoads = new Map<string, Deferred<ArrayBuffer>>()
+    let activeLoads = 0
+    let maximumActiveLoads = 0
+    const narrationLoader = vi.fn((url: string) => {
+      activeLoads += 1
+      maximumActiveLoads = Math.max(maximumActiveLoads, activeLoads)
+      const deferred = createDeferred<ArrayBuffer>()
+      pendingLoads.set(url, deferred)
+      return deferred.promise.finally(() => {
+        activeLoads -= 1
+      })
+    })
+    const { output } = createOutput({}, createNavigator(), narrationLoader)
+    const assets = [
+      ...Array.from({ length: 4 }, (_, index) => ({
+        id: `background-${index + 1}`,
+        url: `/background-${index + 1}.mp3`,
+        preloadPriority: 'background' as const,
+      })),
+      ...Array.from({ length: 5 }, (_, index) => ({
+        id: `initial-${index + 1}`,
+        url: `/initial-${index + 1}.mp3`,
+        preloadPriority: 'initial-round' as const,
+      })),
+    ]
+
+    try {
+      const firstPreparation = output.prepareNarrations(assets)
+      const repeatedPreparation = output.prepareNarrations(assets)
+
+      await vi.waitFor(() => {
+        expect(narrationLoader).toHaveBeenCalledTimes(
+          NARRATION_PRELOAD_CONCURRENCY,
+        )
+      })
+      expect(narrationLoader.mock.calls.map(([url]) => url)).toEqual([
+        '/initial-1.mp3',
+        '/initial-2.mp3',
+        '/initial-3.mp3',
+      ])
+
+      for (const index of [1, 2, 3]) {
+        pendingLoads.get(`/initial-${index}.mp3`)?.resolve(new ArrayBuffer(4))
+      }
+      await vi.waitFor(() => {
+        expect(narrationLoader).toHaveBeenCalledTimes(5)
+      })
+      expect(narrationLoader.mock.calls.slice(0, 5).map(([url]) => url)).toEqual([
+        '/initial-1.mp3',
+        '/initial-2.mp3',
+        '/initial-3.mp3',
+        '/initial-4.mp3',
+        '/initial-5.mp3',
+      ])
+      expect(
+        narrationLoader.mock.calls.some(([url]) =>
+          String(url).includes('background'),
+        ),
+      ).toBe(false)
+
+      for (const index of [4, 5]) {
+        pendingLoads.get(`/initial-${index}.mp3`)?.resolve(new ArrayBuffer(4))
+      }
+      await vi.waitFor(() => {
+        expect(narrationLoader).toHaveBeenCalledTimes(8)
+      })
+      expect(
+        narrationLoader.mock.calls.slice(5, 8).map(([url]) => url),
+      ).toEqual([
+        '/background-1.mp3',
+        '/background-2.mp3',
+        '/background-3.mp3',
+      ])
+
+      for (const index of [1, 2, 3]) {
+        pendingLoads
+          .get(`/background-${index}.mp3`)
+          ?.resolve(new ArrayBuffer(4))
+      }
+      await vi.waitFor(() => {
+        expect(narrationLoader).toHaveBeenCalledTimes(9)
+      })
+      pendingLoads.get('/background-4.mp3')?.resolve(new ArrayBuffer(4))
+      await Promise.all([firstPreparation, repeatedPreparation])
+
+      expect(maximumActiveLoads).toBeLessThanOrEqual(
+        NARRATION_PRELOAD_CONCURRENCY,
+      )
+      expect(narrationLoader).toHaveBeenCalledTimes(assets.length)
+    } finally {
+      output.destroy()
+    }
+  })
+
+  it('retains an active voice across a deck swap and evicts it after playback ends', async () => {
+    const narrationLoader = vi.fn(async () => new ArrayBuffer(8))
+    const { harness, output } = createOutput(
+      {},
+      createNavigator(),
+      narrationLoader,
+    )
+
+    try {
+      await expect(output.unlock()).resolves.toBe(true)
+      await output.prepareNarrations([
+        { id: 'active-a', url: '/active-a.mp3' },
+        { id: 'inactive-a', url: '/inactive-a.mp3' },
+      ])
+      expect(output.narrationPreparedCount).toBe(2)
+      expect(output.playNarration('active-a')).toBe(true)
+      const activeSource = harness.contexts[0]!.bufferSources[0]!
+
+      await output.prepareNarrations([
+        { id: 'current-b', url: '/current-b.mp3' },
+      ])
+      expect(activeSource.stop).not.toHaveBeenCalled()
+      expect(output.narrationPlaying).toBe(true)
+      expect(output.narrationPreparedCount).toBe(2)
+
+      activeSource.finish()
+      expect(output.narrationPlaying).toBe(false)
+      expect(output.narrationPreparedCount).toBe(1)
+      expect(output.playNarration('active-a')).toBe(false)
+      expect(output.playNarration('current-b')).toBe(true)
+    } finally {
+      output.destroy()
+    }
+  })
+
+  it('bounds decoded narration retention even when an oversized scope is supplied', async () => {
+    const narrationLoader = vi.fn(async () => new ArrayBuffer(8))
+    const { output } = createOutput({}, createNavigator(), narrationLoader)
+    const oversizedScope = Array.from(
+      { length: NARRATION_CACHE_MAX_ENTRIES + 6 },
+      (_, index) => ({
+        id: `menu-${index}`,
+        url: `/menu-${index}.mp3`,
+      }),
+    )
+
+    try {
+      await expect(output.unlock()).resolves.toBe(true)
+      await output.prepareNarrations(oversizedScope)
+      expect(output.narrationPreparedCount).toBe(
+        NARRATION_CACHE_MAX_ENTRIES,
+      )
+      expect(output.playNarration('menu-0')).toBe(false)
+      expect(
+        output.playNarration(`menu-${oversizedScope.length - 1}`),
+      ).toBe(true)
+
+      await output.prepareNarrations([])
+      expect(output.narrationPreparedCount).toBe(1)
+      output.stopNarration()
+      expect(output.narrationPreparedCount).toBe(0)
+    } finally {
+      output.destroy()
+    }
   })
 })
