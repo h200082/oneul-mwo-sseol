@@ -17,6 +17,7 @@ import {
   MUSIC_DUCKED_BUS_GAIN,
   MUSIC_EFFECT_DUCKED_BUS_GAIN,
   NARRATION_BUS_GAIN,
+  SENSORY_EFFECT_GAIN,
   SENSORY_MASTER_GAIN,
 } from '../src/feedback/SensoryFeedback'
 
@@ -120,6 +121,7 @@ describe('arcade BGM score', () => {
   it('keeps music audible while every feedback cue retains priority', () => {
     // The strongest sustained overlap is the bass plus one short accent.
     const maximumMusicVoiceGain = 0.052
+    const roomSoundScale = 0.86
     const baseMusicPeak =
       maximumMusicVoiceGain * MUSIC_BUS_GAIN * SENSORY_MASTER_GAIN
     const narrationDuckedPeak =
@@ -129,22 +131,32 @@ describe('arcade BGM score', () => {
       MUSIC_EFFECT_DUCKED_BUS_GAIN *
       SENSORY_MASTER_GAIN
     const missWarningPeak =
-      getSensoryCueSpec('miss-warning').tones[0]!.gain * SENSORY_MASTER_GAIN
+      getSensoryCueSpec('miss-warning').tones[0]!.gain *
+      SENSORY_EFFECT_GAIN *
+      roomSoundScale *
+      SENSORY_MASTER_GAIN
 
-    expect(MUSIC_BUS_GAIN).toBe(0.72)
-    expect(MUSIC_DUCKED_BUS_GAIN).toBe(0.12)
-    expect(MUSIC_EFFECT_DUCKED_BUS_GAIN).toBe(0.09)
-    expect(toDecibels(baseMusicPeak)).toBeGreaterThanOrEqual(-32)
-    expect(toDecibels(baseMusicPeak)).toBeLessThanOrEqual(-30)
-    expect(toDecibels(narrationDuckedPeak)).toBeLessThan(-45)
+    expect(MUSIC_BUS_GAIN).toBe(0.9)
+    expect(MUSIC_DUCKED_BUS_GAIN).toBe(0.18)
+    expect(MUSIC_EFFECT_DUCKED_BUS_GAIN).toBe(0.12)
+    expect(SENSORY_EFFECT_GAIN).toBe(2)
+    expect(NARRATION_BUS_GAIN).toBe(0.68)
+    expect(toDecibels(baseMusicPeak)).toBeGreaterThanOrEqual(-29)
+    expect(toDecibels(baseMusicPeak)).toBeLessThanOrEqual(-28)
+    expect(toDecibels(narrationDuckedPeak)).toBeLessThan(-42)
+    expect(
+      toDecibels(missWarningPeak) - toDecibels(narrationDuckedPeak),
+    ).toBeGreaterThanOrEqual(8)
     expect(
       toDecibels(missWarningPeak) - toDecibels(effectDuckedPeak),
-    ).toBeGreaterThanOrEqual(10)
+    ).toBeGreaterThanOrEqual(12)
 
     const loudestCombinedPeak =
       SENSORY_MASTER_GAIN *
-      (NARRATION_BUS_GAIN + 0.106 + maximumMusicVoiceGain * MUSIC_DUCKED_BUS_GAIN)
-    expect(loudestCombinedPeak).toBeLessThan(0.8)
+      (NARRATION_BUS_GAIN +
+        0.106 * SENSORY_EFFECT_GAIN +
+        maximumMusicVoiceGain * MUSIC_DUCKED_BUS_GAIN)
+    expect(loudestCombinedPeak).toBeLessThan(0.71)
   })
 
   it('keeps the bass audible on small mobile speakers', () => {

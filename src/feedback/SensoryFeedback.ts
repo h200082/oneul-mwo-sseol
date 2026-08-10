@@ -444,20 +444,21 @@ export class SensoryFeedbackController implements SensoryFeedback {
 }
 
 export const SENSORY_MASTER_GAIN = 0.78
+export const SENSORY_EFFECT_GAIN = 2
 
 const PRIMED_GESTURE_MAX_MS = 2_500
 const MUSIC_SCHEDULER_INTERVAL_MS = 90
 const MUSIC_SCHEDULE_AHEAD_SECONDS = 0.32
 const MUSIC_SCHEDULE_MAX_STEPS = 8
-export const MUSIC_BUS_GAIN = 0.72
-export const MUSIC_DUCKED_BUS_GAIN = 0.12
+export const MUSIC_BUS_GAIN = 0.9
+export const MUSIC_DUCKED_BUS_GAIN = 0.18
 const MUSIC_DUCK_ATTACK_SECONDS = 0.045
 const MUSIC_DUCK_RELEASE_SECONDS = 0.12
-export const MUSIC_EFFECT_DUCKED_BUS_GAIN = 0.09
+export const MUSIC_EFFECT_DUCKED_BUS_GAIN = 0.12
 const MUSIC_EFFECT_DUCK_ATTACK_SECONDS = 0.008
 const MUSIC_EFFECT_DUCK_HOLD_SECONDS = 0.035
 const MUSIC_EFFECT_DUCK_RELEASE_SECONDS = 0.2
-export const NARRATION_BUS_GAIN = 0.9
+export const NARRATION_BUS_GAIN = 0.68
 export const NARRATION_INITIAL_ROUND_PRELOAD_COUNT = 5
 export const NARRATION_PRELOAD_CONCURRENCY = 3
 export const NARRATION_CACHE_MAX_ENTRIES = 24
@@ -1674,7 +1675,10 @@ export class BrowserSensoryFeedbackOutput
         )
         gain.gain.setValueAtTime(0.0001, startAt)
         gain.gain.linearRampToValueAtTime(
-          Math.max(0.0001, toneSpec.gain * soundScale),
+          Math.max(
+            0.0001,
+            toneSpec.gain * soundScale * SENSORY_EFFECT_GAIN,
+          ),
           attackEnd,
         )
         gain.gain.exponentialRampToValueAtTime(0.0001, endAt)
