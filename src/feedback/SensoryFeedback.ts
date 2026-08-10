@@ -443,19 +443,21 @@ export class SensoryFeedbackController implements SensoryFeedback {
   }
 }
 
+export const SENSORY_MASTER_GAIN = 0.78
+
 const PRIMED_GESTURE_MAX_MS = 2_500
 const MUSIC_SCHEDULER_INTERVAL_MS = 90
 const MUSIC_SCHEDULE_AHEAD_SECONDS = 0.32
 const MUSIC_SCHEDULE_MAX_STEPS = 8
-const MUSIC_BUS_GAIN = 0.18
-const MUSIC_DUCKED_BUS_GAIN = 0.06
+export const MUSIC_BUS_GAIN = 0.72
+export const MUSIC_DUCKED_BUS_GAIN = 0.12
 const MUSIC_DUCK_ATTACK_SECONDS = 0.045
 const MUSIC_DUCK_RELEASE_SECONDS = 0.12
-const MUSIC_EFFECT_DUCKED_BUS_GAIN = 0.09
+export const MUSIC_EFFECT_DUCKED_BUS_GAIN = 0.09
 const MUSIC_EFFECT_DUCK_ATTACK_SECONDS = 0.008
 const MUSIC_EFFECT_DUCK_HOLD_SECONDS = 0.035
 const MUSIC_EFFECT_DUCK_RELEASE_SECONDS = 0.2
-const NARRATION_BUS_GAIN = 0.9
+export const NARRATION_BUS_GAIN = 0.9
 export const NARRATION_INITIAL_ROUND_PRELOAD_COUNT = 5
 export const NARRATION_PRELOAD_CONCURRENCY = 3
 export const NARRATION_CACHE_MAX_ENTRIES = 24
@@ -1735,7 +1737,10 @@ export class BrowserSensoryFeedbackOutput
         }
         context = new AudioContextClass()
         const masterGain = context.createGain()
-        masterGain.gain.setValueAtTime(0.78, context.currentTime)
+        masterGain.gain.setValueAtTime(
+          SENSORY_MASTER_GAIN,
+          context.currentTime,
+        )
         masterGain.connect(context.destination)
         this.context = context
         this.masterGain = masterGain

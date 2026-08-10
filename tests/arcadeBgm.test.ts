@@ -11,6 +11,14 @@ import {
   type ArcadeBgmEvent,
   type MusicIntensity,
 } from '../src/feedback/arcadeBgm'
+import {
+  getSensoryCueSpec,
+  MUSIC_BUS_GAIN,
+  MUSIC_DUCKED_BUS_GAIN,
+  MUSIC_EFFECT_DUCKED_BUS_GAIN,
+  NARRATION_BUS_GAIN,
+  SENSORY_MASTER_GAIN,
+} from '../src/feedback/SensoryFeedback'
 
 const LEGAL_WAVES = new Set(['sine', 'square', 'triangle', 'sawtooth'])
 const G_MAJOR_PENTATONIC_PITCH_CLASSES = new Set([2, 4, 7, 9, 11])
@@ -109,6 +117,36 @@ describe('arcade BGM score', () => {
     ).toBeLessThanOrEqual(392.01)
   })
 
+  it('keeps music audible while every feedback cue retains priority', () => {
+    // The strongest sustained overlap is the bass plus one short accent.
+    const maximumMusicVoiceGain = 0.052
+    const baseMusicPeak =
+      maximumMusicVoiceGain * MUSIC_BUS_GAIN * SENSORY_MASTER_GAIN
+    const narrationDuckedPeak =
+      maximumMusicVoiceGain * MUSIC_DUCKED_BUS_GAIN * SENSORY_MASTER_GAIN
+    const effectDuckedPeak =
+      maximumMusicVoiceGain *
+      MUSIC_EFFECT_DUCKED_BUS_GAIN *
+      SENSORY_MASTER_GAIN
+    const missWarningPeak =
+      getSensoryCueSpec('miss-warning').tones[0]!.gain * SENSORY_MASTER_GAIN
+
+    expect(MUSIC_BUS_GAIN).toBe(0.72)
+    expect(MUSIC_DUCKED_BUS_GAIN).toBe(0.12)
+    expect(MUSIC_EFFECT_DUCKED_BUS_GAIN).toBe(0.09)
+    expect(toDecibels(baseMusicPeak)).toBeGreaterThanOrEqual(-32)
+    expect(toDecibels(baseMusicPeak)).toBeLessThanOrEqual(-30)
+    expect(toDecibels(narrationDuckedPeak)).toBeLessThan(-45)
+    expect(
+      toDecibels(missWarningPeak) - toDecibels(effectDuckedPeak),
+    ).toBeGreaterThanOrEqual(10)
+
+    const loudestCombinedPeak =
+      SENSORY_MASTER_GAIN *
+      (NARRATION_BUS_GAIN + 0.106 + maximumMusicVoiceGain * MUSIC_DUCKED_BUS_GAIN)
+    expect(loudestCombinedPeak).toBeLessThan(0.8)
+  })
+
   it('keeps the bass audible on small mobile speakers', () => {
     const bassEvents = allEvents('opening').filter(
       (event) => event.wave === 'triangle',
@@ -156,6 +194,10 @@ describe('arcade BGM score', () => {
     )
   })
 })
+
+function toDecibels(amplitude: number): number {
+  return 20 * Math.log10(amplitude)
+}
 
 function allEvents(intensity: MusicIntensity): readonly ArcadeBgmEvent[] {
   return Array.from({ length: ARCADE_BGM_LOOP_STEPS }, (_, step) =>

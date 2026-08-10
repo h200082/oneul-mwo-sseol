@@ -542,7 +542,7 @@ describe('BrowserSensoryFeedbackOutput', () => {
       )
       const firstDuckRelease =
         musicGain.gain.linearRampToValueAtTime.mock.calls.at(-1)
-      expect(firstDuckRelease?.[0]).toBe(0.18)
+      expect(firstDuckRelease?.[0]).toBe(0.72)
       expect(firstDuckRelease?.[1]).toBeCloseTo(
         context.currentTime + 0.32,
         12,
@@ -559,7 +559,7 @@ describe('BrowserSensoryFeedbackOutput', () => {
       expect(extendedDuckHold?.[1]).toBeCloseTo(0.19, 12)
       const extendedDuckRelease =
         musicGain.gain.linearRampToValueAtTime.mock.calls.at(-1)
-      expect(extendedDuckRelease?.[0]).toBe(0.18)
+      expect(extendedDuckRelease?.[0]).toBe(0.72)
       expect(extendedDuckRelease?.[1]).toBeCloseTo(0.39, 12)
     } finally {
       output.destroy()
@@ -837,7 +837,7 @@ describe('BrowserSensoryFeedbackOutput', () => {
       expect(output.narrationPlaying).toBe(true)
       expect(output.musicDucked).toBe(true)
       expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(
-        0.06,
+        0.12,
         context.currentTime + 0.045,
       )
 
@@ -852,7 +852,7 @@ describe('BrowserSensoryFeedbackOutput', () => {
       expect(output.narrationPlaying).toBe(false)
       expect(output.musicDucked).toBe(false)
       expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(
-        0.18,
+        0.72,
         context.currentTime + 0.12,
       )
     } finally {
