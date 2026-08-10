@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   ARCADE_BGM_BPM,
+  ARCADE_BGM_GAIN_SCALE,
   ARCADE_BGM_INTENSITIES,
   ARCADE_BGM_LOOP_STEPS,
   ARCADE_BGM_STEPS_PER_BEAT,
@@ -22,20 +23,20 @@ import {
 } from '../src/feedback/SensoryFeedback'
 
 const LEGAL_WAVES = new Set(['sine', 'square', 'triangle', 'sawtooth'])
-const G_MAJOR_PENTATONIC_PITCH_CLASSES = new Set([2, 4, 7, 9, 11])
+const G_MAJOR_PITCH_CLASSES = new Set([0, 2, 4, 6, 7, 9, 11])
 
 describe('arcade BGM score', () => {
-  it('uses a 120 BPM, four-bar 16th-note clock', () => {
-    expect(ARCADE_BGM_BPM).toBe(120)
+  it('uses a 152 BPM, eight-bar 16th-note clock', () => {
+    expect(ARCADE_BGM_BPM).toBe(152)
     expect(ARCADE_BGM_STEPS_PER_BEAT).toBe(4)
-    expect(ARCADE_BGM_LOOP_STEPS).toBe(64)
-    expect(ARCADE_BGM_STEP_SECONDS).toBeCloseTo(60 / 120 / 4, 12)
+    expect(ARCADE_BGM_LOOP_STEPS).toBe(128)
+    expect(ARCADE_BGM_STEP_SECONDS).toBeCloseTo(60 / 152 / 4, 12)
   })
 
-  it('is exactly periodic over all 64 steps in either direction', () => {
+  it('is exactly periodic over all 128 steps in either direction', () => {
     for (const intensity of ARCADE_BGM_INTENSITIES) {
-      for (let step = -128; step < 128; step += 1) {
-        expect(getArcadeBgmEvents(step + 64, intensity)).toBe(
+      for (let step = -256; step < 256; step += 1) {
+        expect(getArcadeBgmEvents(step + 128, intensity)).toBe(
           getArcadeBgmEvents(step, intensity),
         )
       }
@@ -56,23 +57,24 @@ describe('arcade BGM score', () => {
     }
   })
 
-  it('keeps every pitch in the G-major pentatonic palette', () => {
+  it('keeps every pitch in the G-major palette', () => {
     for (const intensity of ARCADE_BGM_INTENSITIES) {
       for (let step = 0; step < ARCADE_BGM_LOOP_STEPS; step += 1) {
         for (const event of getArcadeBgmEvents(step, intensity)) {
-          const midiNote = 69 + 12 * Math.log2(event.frequency / 440)
-          expect(midiNote).toBeCloseTo(Math.round(midiNote), 10)
-          expect(
-            G_MAJOR_PENTATONIC_PITCH_CLASSES.has(
-              ((Math.round(midiNote) % 12) + 12) % 12,
-            ),
-          ).toBe(true)
+          for (const frequency of [event.frequency, event.endFrequency]) {
+            const midiNote = 69 + 12 * Math.log2(frequency / 440)
+            expect(midiNote).toBeCloseTo(Math.round(midiNote), 10)
+            expect(
+              G_MAJOR_PITCH_CLASSES.has(
+                ((Math.round(midiNote) % 12) + 12) % 12,
+              ),
+            ).toBe(true)
+          }
         }
       }
     }
   })
-
-  it('starts with bass and pluck voices, then adds denser supersets', () => {
+  it('starts with rhythm and lead voices, then adds denser supersets', () => {
     const intensityOrder: readonly MusicIntensity[] = [
       'opening',
       'rotation',
@@ -81,7 +83,7 @@ describe('arcade BGM score', () => {
     ]
     const totals = intensityOrder.map((intensity) => eventCount(intensity))
 
-    expect(totals).toEqual([16, 24, 32, 40])
+    expect(totals).toEqual([152, 280, 328, 376])
     expect(
       allEvents('opening').some((event) => event.wave === 'triangle'),
     ).toBe(true)
@@ -100,27 +102,33 @@ describe('arcade BGM score', () => {
     }
   })
 
-  it('leaves bright effect space and never starts stacked notes', () => {
+  it('fills every later-phase step without exceeding the music headroom cap', () => {
+    expect(ARCADE_BGM_GAIN_SCALE).toBe(1.2)
+
     for (const intensity of ARCADE_BGM_INTENSITIES) {
       for (let step = 0; step < ARCADE_BGM_LOOP_STEPS; step += 1) {
         const events = getArcadeBgmEvents(step, intensity)
-        expect(events).toHaveLength(events.length > 0 ? 1 : 0)
+        expect(events.length).toBeLessThanOrEqual(4)
         expect(
           events.reduce((total, event) => total + event.gain, 0),
-        ).toBeLessThanOrEqual(0.044)
+        ).toBeLessThanOrEqual(0.255)
       }
+    }
+
+    for (let step = 0; step < ARCADE_BGM_LOOP_STEPS; step += 1) {
+      expect(getArcadeBgmEvents(step, 'rotation').length).toBeGreaterThan(0)
+      expect(getArcadeBgmEvents(step, 'final-five').length).toBeGreaterThan(0)
+      expect(getArcadeBgmEvents(step, 'final-two').length).toBeGreaterThan(0)
     }
 
     expect(
       Math.max(
         ...allEvents('final-two').map((event) => event.frequency),
       ),
-    ).toBeLessThanOrEqual(392.01)
+    ).toBeLessThanOrEqual(2_350)
   })
-
-  it('keeps music audible while every feedback cue retains priority', () => {
-    // The strongest sustained overlap is the bass plus one short accent.
-    const maximumMusicVoiceGain = 0.052
+  it('plays loudly while narration and every feedback cue retain priority', () => {
+    const maximumMusicVoiceGain = 0.3
     const roomSoundScale = 0.86
     const baseMusicPeak =
       maximumMusicVoiceGain * MUSIC_BUS_GAIN * SENSORY_MASTER_GAIN
@@ -136,14 +144,13 @@ describe('arcade BGM score', () => {
       roomSoundScale *
       SENSORY_MASTER_GAIN
 
-    expect(MUSIC_BUS_GAIN).toBe(0.9)
-    expect(MUSIC_DUCKED_BUS_GAIN).toBe(0.18)
-    expect(MUSIC_EFFECT_DUCKED_BUS_GAIN).toBe(0.12)
+    expect(MUSIC_BUS_GAIN).toBe(1.35)
+    expect(MUSIC_DUCKED_BUS_GAIN).toBe(0.03)
+    expect(MUSIC_EFFECT_DUCKED_BUS_GAIN).toBe(0.02)
     expect(SENSORY_EFFECT_GAIN).toBe(2)
     expect(NARRATION_BUS_GAIN).toBe(0.68)
-    expect(toDecibels(baseMusicPeak)).toBeGreaterThanOrEqual(-29)
-    expect(toDecibels(baseMusicPeak)).toBeLessThanOrEqual(-28)
-    expect(toDecibels(narrationDuckedPeak)).toBeLessThan(-42)
+    expect(toDecibels(baseMusicPeak)).toBeGreaterThanOrEqual(-10.2)
+    expect(toDecibels(baseMusicPeak)).toBeLessThanOrEqual(-9.8)
     expect(
       toDecibels(missWarningPeak) - toDecibels(narrationDuckedPeak),
     ).toBeGreaterThanOrEqual(8)
@@ -158,18 +165,19 @@ describe('arcade BGM score', () => {
         maximumMusicVoiceGain * MUSIC_DUCKED_BUS_GAIN)
     expect(loudestCombinedPeak).toBeLessThan(0.71)
   })
-
-  it('keeps the bass audible on small mobile speakers', () => {
+  it('keeps the sustained bass audible on small mobile speakers', () => {
     const bassEvents = allEvents('opening').filter(
-      (event) => event.wave === 'triangle',
+      (event) =>
+        event.wave === 'triangle' &&
+        event.durationSteps === 2 &&
+        event.frequency < 400,
     )
 
-    expect(bassEvents).toHaveLength(8)
+    expect(bassEvents).toHaveLength(32)
     expect(
       Math.min(...bassEvents.map((event) => event.frequency)),
-    ).toBeGreaterThanOrEqual(120)
+    ).toBeGreaterThanOrEqual(130)
   })
-
   it('maps round boundaries to escalating music intensity', () => {
     expect(getRoundMusicIntensity(0)).toBe('opening')
     expect(getRoundMusicIntensity(4)).toBe('opening')
@@ -196,7 +204,7 @@ describe('arcade BGM score', () => {
       getArcadeBgmEvents(3, 'opening'),
     )
     expect(getArcadeBgmEvents(-1, 'opening')).toBe(
-      getArcadeBgmEvents(63, 'opening'),
+      getArcadeBgmEvents(127, 'opening'),
     )
     expect(getArcadeBgmEvents(Number.NaN, 'opening')).toBe(
       getArcadeBgmEvents(0, 'opening'),
@@ -234,5 +242,5 @@ function expectSafeEvent(event: Readonly<ArcadeBgmEvent>): void {
   expect(event.durationSteps).toBeLessThanOrEqual(ARCADE_BGM_LOOP_STEPS)
   expect(Number.isFinite(event.gain)).toBe(true)
   expect(event.gain).toBeGreaterThan(0)
-  expect(event.gain).toBeLessThanOrEqual(0.1)
+  expect(event.gain).toBeLessThanOrEqual(0.14)
 }

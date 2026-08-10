@@ -4,6 +4,7 @@ import type {
 } from '../domain/room'
 import type { PlayerScoreSummary } from '../domain/gameRules'
 import type { RoomGameProgressIdentity } from './gameProgress'
+import type { SliceToolId } from './sliceTools'
 
 export const TUTORIAL_COMPLETE_EVENT = 'tutorial-complete' as const
 
@@ -13,6 +14,8 @@ export interface GameLaunchOptions {
   readonly launchMode?: 'game' | 'tutorial'
   readonly mealTime: MealTime
   readonly deckSeed: RoomDeckSeed
+  /** Cosmetic slice trail selected on this device. */
+  readonly sliceTool?: SliceToolId
   /** Best score stored on this device before this solo run starts. */
   readonly previousPersonalBestScore?: number
   readonly roomCode?: string

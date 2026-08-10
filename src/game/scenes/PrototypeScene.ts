@@ -61,6 +61,12 @@ import {
   getSliceImpactProfile,
   type SliceImpactProfile,
 } from '../sliceImpactProfile'
+import {
+  DEFAULT_SLICE_TOOL_ID,
+  RAINBOW_SLICE_TOOL_ID,
+  getRainbowTrailColor,
+  type SliceToolId,
+} from '../sliceTools'
 
 const TOTAL_ROUNDS = DEFAULT_DECK_SIZE
 const JUDGEMENT_RADIUS = 64
@@ -92,6 +98,10 @@ const ROOM_SOUND_SCALE = 0.86
 const NARRATION_CAPTION_VISIBLE_MS = 1_400
 const NARRATION_CAPTION_FADE_MS = 180
 const TRAIL_RECENT_POINT_LIMIT = 30
+const RAINBOW_STAR_DUST_SPAWN_DISTANCE = 22
+const MAX_RAINBOW_STAR_DUST_PARTICLES = 14
+const RAINBOW_STAR_DUST_MIN_LIFETIME_MS = 450
+const RAINBOW_STAR_DUST_LIFETIME_STEP_MS = 50
 const CHEF_CAT_TEXTURE_KEY = 'title-chef-cat'
 const SLICE_SENSORY_CUE = Object.freeze({
   'needs-practice': 'slice-low',
@@ -167,6 +177,17 @@ interface CaptureSlot {
 type PracticeStage = 'slice' | 'capture' | 'complete'
 type CompletedPracticeAction = Exclude<PracticeStage, 'complete'>
 
+interface RainbowStarDustParticle {
+  readonly originX: number
+  readonly originY: number
+  readonly driftX: number
+  readonly dropDistance: number
+  readonly lifetimeMs: number
+  readonly size: number
+  readonly color: number
+  ageMs: number
+}
+
 const TOKEN_X_SEQUENCE = [
   196, 126, 264, 166, 236, 102, 284, 146, 250, 190, 116, 274, 154, 230, 96,
   288, 176, 218, 132, 258,
@@ -178,6 +199,11 @@ export class PrototypeScene extends Phaser.Scene {
   >
   private trail!: Phaser.GameObjects.Graphics
   private progressText!: Phaser.GameObjects.Text
+  private rainbowStarDustGraphics: Phaser.GameObjects.Graphics | null = null
+  private rainbowStarDustParticles: RainbowStarDustParticle[] = []
+  private rainbowStarDustTravelDistance = 0
+  private emittedRainbowStarDustCount = 0
+  private cleanedRainbowStarDustCount = 0
   private scoreText!: Phaser.GameObjects.Text
   private captureText!: Phaser.GameObjects.Text
   private feedbackText!: Phaser.GameObjects.Text
@@ -207,6 +233,7 @@ export class PrototypeScene extends Phaser.Scene {
   private lastSliceSource: SliceGestureDecision['source'] | null = null
   private lastSliceFxTier: SliceFeedback['level'] | null = null
   private lastSliceFxProfile: Readonly<SliceImpactProfile> | null = null
+  private lastTrailSegmentColors: number[] = []
   private activeSlicePieceCount = 0
   private cleanedSlicePieceCount = 0
   private activeSliceFxObjectCount = 0
@@ -291,6 +318,7 @@ export class PrototypeScene extends Phaser.Scene {
     this.restoreCapturedMenus()
 
     this.trail = this.add.graphics().setDepth(20)
+    this.rainbowStarDustGraphics = this.add.graphics().setDepth(21)
 
     this.input.on(
       Phaser.Input.Events.POINTER_DOWN,
@@ -337,6 +365,10 @@ export class PrototypeScene extends Phaser.Scene {
     }
   }
 
+  update(_time: number, delta: number): void {
+    this.updateRainbowStarDust(delta)
+  }
+
   private resetRunState(): void {
     this.gestureTimeout?.remove(false)
     this.narrationCaptionTimer?.remove(false)
@@ -371,6 +403,12 @@ export class PrototypeScene extends Phaser.Scene {
     this.lastSliceSource = null
     this.lastSliceFxTier = null
     this.lastSliceFxProfile = null
+    this.lastTrailSegmentColors = []
+    this.rainbowStarDustGraphics = null
+    this.rainbowStarDustParticles = []
+    this.rainbowStarDustTravelDistance = 0
+    this.emittedRainbowStarDustCount = 0
+    this.cleanedRainbowStarDustCount = 0
     this.activeSlicePieceCount = 0
     this.cleanedSlicePieceCount = 0
     this.activeSliceFxObjectCount = 0
@@ -450,6 +488,11 @@ export class PrototypeScene extends Phaser.Scene {
     readonly filledCaptureSlotCount: number
     readonly pathPointCount: number
     readonly localPathPointCount: number
+    readonly sliceTool: SliceToolId
+    readonly lastTrailSegmentColors: readonly number[]
+    readonly activeRainbowStarDustCount: number
+    readonly emittedRainbowStarDustCount: number
+    readonly cleanedRainbowStarDustCount: number
     readonly lastSliceAngleDegrees: number | null
     readonly lastSliceSource: SliceGestureDecision['source'] | null
     readonly lastSliceFxTier: SliceFeedback['level'] | null
@@ -558,6 +601,12 @@ export class PrototypeScene extends Phaser.Scene {
       filledCaptureSlotCount: this.filledCaptureSlotCount,
       pathPointCount: this.path.length,
       localPathPointCount: this.localPath.length,
+      sliceTool:
+        this.launchOptions.sliceTool ?? DEFAULT_SLICE_TOOL_ID,
+      lastTrailSegmentColors: [...this.lastTrailSegmentColors],
+      activeRainbowStarDustCount: this.rainbowStarDustParticles.length,
+      emittedRainbowStarDustCount: this.emittedRainbowStarDustCount,
+      cleanedRainbowStarDustCount: this.cleanedRainbowStarDustCount,
       lastSliceAngleDegrees: this.lastSliceAngleDegrees,
       lastSliceSource: this.lastSliceSource,
       lastSliceFxTier: this.lastSliceFxTier,
@@ -2059,6 +2108,7 @@ export class PrototypeScene extends Phaser.Scene {
     this.isSlicing = forceSlicePractice || !startsOnCaptureTarget
     this.path = [startPoint]
     this.localPath = [localStartPoint]
+    this.rainbowStarDustTravelDistance = 0
     this.trail.clear()
 
     if (
@@ -2090,6 +2140,7 @@ export class PrototypeScene extends Phaser.Scene {
 
     const next = this.toPoint(pointer)
     const localNext = this.toTokenLocalPoint(next, this.activeToken)
+    const previous = this.path.at(-1)
     const appended = this.appendPathPoint(next, localNext)
     const start = this.path[0]
     const dragDistance = start
@@ -2103,6 +2154,9 @@ export class PrototypeScene extends Phaser.Scene {
     }
 
     if (this.isSlicing && appended) {
+      if (previous) {
+        this.emitRainbowStarDust(previous, next)
+      }
       this.drawTrail()
     }
   }
@@ -2126,6 +2180,7 @@ export class PrototypeScene extends Phaser.Scene {
     this.isSlicing = false
     this.activePointerId = null
 
+    this.rainbowStarDustTravelDistance = 0
     if (!token || this.activeToken?.container !== token.container) {
       this.path = []
       this.localPath = []
@@ -2198,6 +2253,7 @@ export class PrototypeScene extends Phaser.Scene {
     this.localPath = []
     this.trail.clear()
 
+    this.clearRainbowStarDust()
     if (wasDrawing && this.activeToken) {
       this.feedbackText.setText(
         wasHolding
@@ -2220,6 +2276,8 @@ export class PrototypeScene extends Phaser.Scene {
     this.clearGestureTimeout()
     this.cancelHoldCapture()
     this.introTimer?.remove(false)
+    this.clearRainbowStarDust()
+    this.rainbowStarDustGraphics = null
     this.introTimer = null
     this.introOverlay?.destroy(true)
     this.introOverlay = null
@@ -3890,6 +3948,10 @@ export class PrototypeScene extends Phaser.Scene {
 
   private drawTrail(): void {
     this.trail.clear()
+    this.lastTrailSegmentColors = []
+    const selectedTool =
+      this.launchOptions.sliceTool ?? DEFAULT_SLICE_TOOL_ID
+    const usesRainbowTrail = selectedTool === RAINBOW_SLICE_TOOL_ID
     const pointLimit = this.reducedMotion
       ? Math.min(18, TRAIL_RECENT_POINT_LIMIT)
       : TRAIL_RECENT_POINT_LIMIT
@@ -3898,6 +3960,10 @@ export class PrototypeScene extends Phaser.Scene {
       return
     }
 
+    const firstSegmentIndex = Math.max(
+      0,
+      this.path.length - recentPath.length,
+    )
     for (let index = 1; index < recentPath.length; index += 1) {
       const previous = recentPath[index - 1]!
       const point = recentPath[index]!
@@ -3912,23 +3978,26 @@ export class PrototypeScene extends Phaser.Scene {
         3.8 + taper * (this.reducedMotion ? 4.4 : 6.2) + speedFactor * 0.8
       const coreWidth =
         1.2 + taper * (this.reducedMotion ? 2 : 3.2) + speedFactor * 0.6
+      const segmentIndex = firstSegmentIndex + index - 1
+      const rainbowColor = getRainbowTrailColor(segmentIndex)
+      const glowColor = usesRainbowTrail ? rainbowColor : 0x55e6d1
+      const coreColor = usesRainbowTrail ? rainbowColor : 0xfff8e7
+      const glowAlpha = usesRainbowTrail
+        ? (this.reducedMotion ? 0.16 : 0.24) + taper * 0.14
+        : (this.reducedMotion ? 0.1 : 0.16) + taper * 0.1
+      const coreAlpha = usesRainbowTrail
+        ? 0.76 + taper * 0.22
+        : 0.6 + taper * 0.34
 
-      this.trail.lineStyle(
-        glowWidth,
-        0x55e6d1,
-        (this.reducedMotion ? 0.1 : 0.16) + taper * 0.1,
-      )
+      this.lastTrailSegmentColors.push(coreColor)
+      this.trail.lineStyle(glowWidth, glowColor, glowAlpha)
       this.trail.lineBetween(
         previous.x,
         previous.y,
         point.x,
         point.y,
       )
-      this.trail.lineStyle(
-        coreWidth,
-        0xfff8e7,
-        0.6 + taper * 0.34,
-      )
+      this.trail.lineStyle(coreWidth, coreColor, coreAlpha)
       this.trail.lineBetween(
         previous.x,
         previous.y,
@@ -3938,12 +4007,124 @@ export class PrototypeScene extends Phaser.Scene {
     }
 
     const finalPoint = recentPath.at(-1)!
-    this.trail.fillStyle(0xffffff, 1)
+    const finalTrailColor = usesRainbowTrail
+      ? (this.lastTrailSegmentColors.at(-1) ?? getRainbowTrailColor(0))
+      : 0xffffff
+    this.trail.fillStyle(finalTrailColor, 1)
     this.trail.fillCircle(
       finalPoint.x,
       finalPoint.y,
       this.reducedMotion ? 1.5 : 2,
     )
+  }
+
+  private emitRainbowStarDust(previous: Point, point: Point): void {
+    const selectedTool =
+      this.launchOptions.sliceTool ?? DEFAULT_SLICE_TOOL_ID
+    if (
+      this.reducedMotion ||
+      selectedTool !== RAINBOW_SLICE_TOOL_ID ||
+      !this.rainbowStarDustGraphics
+    ) {
+      return
+    }
+
+    this.rainbowStarDustTravelDistance +=
+      Phaser.Math.Distance.BetweenPoints(previous, point)
+    if (
+      this.rainbowStarDustTravelDistance <
+      RAINBOW_STAR_DUST_SPAWN_DISTANCE
+    ) {
+      return
+    }
+
+    this.rainbowStarDustTravelDistance %= RAINBOW_STAR_DUST_SPAWN_DISTANCE
+    if (
+      this.rainbowStarDustParticles.length >=
+      MAX_RAINBOW_STAR_DUST_PARTICLES
+    ) {
+      return
+    }
+
+    const spawnIndex = this.emittedRainbowStarDustCount
+    const driftPattern = [-8, -4, 0, 4, 8] as const
+    this.rainbowStarDustParticles.push({
+      originX: point.x + ((spawnIndex % 3) - 1) * 2,
+      originY: point.y + 1,
+      driftX: driftPattern[spawnIndex % driftPattern.length]!,
+      dropDistance: 24 + (spawnIndex % 4) * 4,
+      lifetimeMs:
+        RAINBOW_STAR_DUST_MIN_LIFETIME_MS +
+        (spawnIndex % 5) * RAINBOW_STAR_DUST_LIFETIME_STEP_MS,
+      size: 3.2 + (spawnIndex % 3) * 0.6,
+      color: getRainbowTrailColor(spawnIndex),
+      ageMs: 0,
+    })
+    this.emittedRainbowStarDustCount += 1
+  }
+
+  private updateRainbowStarDust(delta: number): void {
+    const graphics = this.rainbowStarDustGraphics
+    if (!graphics || this.rainbowStarDustParticles.length === 0) {
+      return
+    }
+
+    graphics.clear()
+    const elapsedMs = Number.isFinite(delta) ? Math.max(0, delta) : 0
+    for (
+      let index = this.rainbowStarDustParticles.length - 1;
+      index >= 0;
+      index -= 1
+    ) {
+      const particle = this.rainbowStarDustParticles[index]!
+      particle.ageMs += elapsedMs
+      if (particle.ageMs >= particle.lifetimeMs) {
+        this.rainbowStarDustParticles.splice(index, 1)
+        this.cleanedRainbowStarDustCount += 1
+        continue
+      }
+
+      const progress = particle.ageMs / particle.lifetimeMs
+      const x = particle.originX + particle.driftX * progress
+      const y =
+        particle.originY +
+        particle.dropDistance *
+          (0.2 * progress + 0.8 * progress * progress)
+      const alpha = Math.max(0, 1 - progress)
+      const size = particle.size * (1 - progress * 0.25)
+      const strokeWidth = Math.max(0.8, size * 0.34)
+
+      graphics.lineStyle(strokeWidth, particle.color, alpha)
+      graphics.lineBetween(x - size, y, x + size, y)
+      graphics.lineBetween(x, y - size, x, y + size)
+      const diagonalSize = size * 0.55
+      graphics.lineStyle(
+        Math.max(0.65, strokeWidth * 0.72),
+        particle.color,
+        alpha * 0.72,
+      )
+      graphics.lineBetween(
+        x - diagonalSize,
+        y - diagonalSize,
+        x + diagonalSize,
+        y + diagonalSize,
+      )
+      graphics.lineBetween(
+        x - diagonalSize,
+        y + diagonalSize,
+        x + diagonalSize,
+        y - diagonalSize,
+      )
+      graphics.fillStyle(0xfff8e7, Math.min(1, alpha + 0.12))
+      graphics.fillCircle(x, y, Math.max(0.5, strokeWidth * 0.48))
+    }
+  }
+
+  private clearRainbowStarDust(): void {
+    this.cleanedRainbowStarDustCount += this.rainbowStarDustParticles.length
+    this.rainbowStarDustParticles.length = 0
+    this.rainbowStarDustTravelDistance = 0
+    this.rainbowStarDustGraphics?.clear()
   }
 
   private toPoint(pointer: Phaser.Input.Pointer): Point {
