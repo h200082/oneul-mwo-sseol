@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   BrowserSensoryFeedbackOutput,
+  MUSIC_BUS_GAIN,
+  MUSIC_DUCKED_BUS_GAIN,
+  MUSIC_EFFECT_DUCKED_BUS_GAIN,
+  NARRATION_BUS_GAIN,
+  SENSORY_EFFECT_GAIN,
   NARRATION_CACHE_MAX_ENTRIES,
   NARRATION_PRELOAD_CONCURRENCY,
   type SensoryTone,
@@ -530,36 +535,36 @@ describe('BrowserSensoryFeedbackOutput', () => {
 
       expect(output.play([FIRST_TONE], 1)).toBe(true)
       expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(
-        0.09,
+        MUSIC_EFFECT_DUCKED_BUS_GAIN,
         context.currentTime + 0.008,
       )
       const firstDuckHold =
         musicGain.gain.setValueAtTime.mock.calls.at(-1)
-      expect(firstDuckHold?.[0]).toBe(0.09)
+      expect(firstDuckHold?.[0]).toBe(MUSIC_EFFECT_DUCKED_BUS_GAIN)
       expect(firstDuckHold?.[1]).toBeCloseTo(
         context.currentTime + 0.12,
         12,
       )
       const firstDuckRelease =
         musicGain.gain.linearRampToValueAtTime.mock.calls.at(-1)
-      expect(firstDuckRelease?.[0]).toBe(0.72)
+      expect(firstDuckRelease?.[0]).toBe(MUSIC_BUS_GAIN)
       expect(firstDuckRelease?.[1]).toBeCloseTo(
         context.currentTime + 0.32,
         12,
       )
       const firstEffectGain = context.gains.at(-1)!
       expect(firstEffectGain.gain.linearRampToValueAtTime)
-        .toHaveBeenCalledWith(FIRST_TONE.gain, 0.017)
+        .toHaveBeenCalledWith(FIRST_TONE.gain * SENSORY_EFFECT_GAIN, 0.017)
 
       context.currentTime = 0.04
       expect(output.play(LATEST_TONES, 1)).toBe(true)
       const extendedDuckHold =
         musicGain.gain.setValueAtTime.mock.calls.at(-1)
-      expect(extendedDuckHold?.[0]).toBe(0.09)
+      expect(extendedDuckHold?.[0]).toBe(MUSIC_EFFECT_DUCKED_BUS_GAIN)
       expect(extendedDuckHold?.[1]).toBeCloseTo(0.19, 12)
       const extendedDuckRelease =
         musicGain.gain.linearRampToValueAtTime.mock.calls.at(-1)
-      expect(extendedDuckRelease?.[0]).toBe(0.72)
+      expect(extendedDuckRelease?.[0]).toBe(MUSIC_BUS_GAIN)
       expect(extendedDuckRelease?.[1]).toBeCloseTo(0.39, 12)
     } finally {
       output.destroy()
@@ -836,8 +841,13 @@ describe('BrowserSensoryFeedbackOutput', () => {
       expect(output.playNarration('ramyeon')).toBe(true)
       expect(output.narrationPlaying).toBe(true)
       expect(output.musicDucked).toBe(true)
+      const narrationGain = context.gains.at(-1)!
+      expect(narrationGain.gain.setValueAtTime).toHaveBeenCalledWith(
+        NARRATION_BUS_GAIN,
+        context.currentTime,
+      )
       expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenCalledWith(
-        0.12,
+        MUSIC_DUCKED_BUS_GAIN,
         context.currentTime + 0.045,
       )
 
@@ -852,7 +862,7 @@ describe('BrowserSensoryFeedbackOutput', () => {
       expect(output.narrationPlaying).toBe(false)
       expect(output.musicDucked).toBe(false)
       expect(musicGain.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(
-        0.72,
+        MUSIC_BUS_GAIN,
         context.currentTime + 0.12,
       )
     } finally {
